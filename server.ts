@@ -12,10 +12,46 @@ async function startServer() {
 
   // Proxy endpoint
   app.get('/api/proxy', async (req, res) => {
-    const targetUrl = req.query.url as string;
+    let targetUrl = req.query.url as string;
+
+    // Try to recover target URL from Referer if missing from query
+    if (!targetUrl && req.headers.referer) {
+      try {
+        const refererUrl = new URL(req.headers.referer);
+        const prevTargetUrl = refererUrl.searchParams.get('url');
+        if (prevTargetUrl) {
+          // Reconstruct the intended URL by combining previous target base and current query
+          const baseTarget = new URL(prevTargetUrl);
+          const currentPath = req.url.split('?')[0]; // Likely /api/proxy
+          // If the request was for a relative path on the target site
+          const queryParams = { ...req.query };
+          const newTargetUrl = new URL(baseTarget.origin);
+          newTargetUrl.pathname = baseTarget.pathname;
+          Object.entries(queryParams).forEach(([key, value]) => {
+            newTargetUrl.searchParams.append(key, value as string);
+          });
+          targetUrl = newTargetUrl.href;
+        }
+      } catch (e) {
+        console.error('Referer recovery failed:', e);
+      }
+    }
 
     if (!targetUrl) {
       return res.status(400).send('URL is required');
+    }
+
+    // Append other query parameters back to targetUrl
+    // This is crucial for forms (like Google Search) that use GET method
+    const queryParams = { ...req.query };
+    delete queryParams.url;
+    
+    if (Object.keys(queryParams).length > 0) {
+      const urlObj = new URL(targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl);
+      Object.entries(queryParams).forEach(([key, value]) => {
+        urlObj.searchParams.append(key, value as string);
+      });
+      targetUrl = urlObj.href;
     }
 
     try {
@@ -60,9 +96,8 @@ async function startServer() {
         const base = new URL(resolvedUrl);
 
         // Basic link rewriting for HTML/CSS
-        // This is a naive implementation but works for most simple cases
-        // It replaces URLs in src, href attributes
-        const baseUrl = `${req.protocol}://${req.get('host')}/api/proxy?url=`;
+        // Use a relative path for the base URL to ensure it works behind the AI Studio proxy
+        const baseUrl = '/api/proxy?url=';
         
         // Regex to find attributes like src="...", href="..."
         // This targets typical HTML/CSS URL patterns
@@ -115,6 +150,25 @@ async function startServer() {
                  }
                }
 
+               // Proxy Location Object to trick site checks
+               const locationProxy = new Proxy(window.location, {
+                 get(target, prop) {
+                   if (prop === 'host' || prop === 'hostname') return new URL(targetBase).hostname;
+                   if (prop === 'origin') return new URL(targetBase).origin;
+                   if (prop === 'href') return targetBase;
+                   return target[prop];
+                 }
+               });
+
+               // Patch Worker to proxy worker scripts
+               const originalWorker = window.Worker;
+               window.Worker = function(scriptURL, options) {
+                 return new originalWorker(wrapUrl(scriptURL), options);
+               };
+
+               // Avoid ServiceWorkers as they conflict with proxying logic
+               navigator.serviceWorker.register = () => new Promise(() => {});
+
                // Patch Fetch
                const originalFetch = window.fetch;
                window.fetch = function(input, init) {
@@ -133,8 +187,7 @@ async function startServer() {
                  return originalOpen.call(this, method, wrapUrl(url), ...args);
                };
 
-               // Patch Image.src, Script.src etc via MutationObserver or accessors if possible
-               // For now, let's patch the most common ones
+               // Patch common element creation
                const proxiedTags = ['img', 'script', 'iframe', 'source', 'video', 'audio', 'link', 'embed', 'object'];
                const originalCreateElement = document.createElement;
                document.createElement = function(tagName, options) {
@@ -167,10 +220,46 @@ async function startServer() {
                  return originalSetAttribute.call(this, name, value);
                };
 
+               // Patch Form Submissions
+               window.addEventListener('submit', function(e) {
+                 const form = e.target;
+                 if (form.tagName === 'FORM') {
+                   const method = (form.getAttribute('method') || 'GET').toUpperCase();
+                   const action = form.getAttribute('action');
+                   if (action && !action.startsWith(proxyBase)) {
+                     const targetUrl = new URL(action, document.baseURI).href;
+                     if (method === 'GET') {
+                       // For GET forms, append the target URL as a hidden input
+                       // to preserve it across navigation
+                       let urlInput = form.querySelector('input[name="url"]');
+                       if (!urlInput) {
+                         urlInput = document.createElement('input');
+                         urlInput.setAttribute('type', 'hidden');
+                         urlInput.setAttribute('name', 'url');
+                         form.appendChild(urlInput);
+                       }
+                       urlInput.value = targetUrl;
+                       form.setAttribute('action', '/api/proxy');
+                     } else {
+                       form.setAttribute('action', wrapUrl(action));
+                     }
+                   }
+                 }
+               }, true);
+
+               // Intercept all link clicks to ensure they are proxied
+               window.addEventListener('click', function(e) {
+                 const target = e.target.closest('a');
+                 if (target && target.href && !target.href.startsWith(proxyBase) && !target.href.startsWith('javascript:') && !target.href.startsWith('#')) {
+                   target.href = wrapUrl(target.href);
+                 }
+               }, true);
+
              })();
            </script>
            `;
-           text = text.replace('<head>', '<head>' + injection);
+           // Inject at the beginning of head
+           text = text.replace(/<head>/i, '<head>' + injection);
         }
 
         res.send(text);
