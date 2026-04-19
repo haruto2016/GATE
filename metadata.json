@@ -1,0 +1,6 @@
+{
+  "name": "ShadowProxy",
+  "description": "Secure web proxy for unrestricted browsing and bypassing site filters with real-time content rewriting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

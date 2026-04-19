@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Helvetica Neue", Arial, ui-sans-serif, system-ui, sans-serif;
+  --color-glass-bg: rgba(255, 255, 255, 0.08);
+  --color-glass-border: rgba(255, 255, 255, 0.15);
+}
+
+@layer base {
+  body {
+    background-color: #050a16;
+    color: #ffffff;
+    overflow: hidden;
+  }
+}
+
+@layer utilities {
+  .mesh-bg {
+    background: 
+      radial-gradient(circle at 20% 30%, #1e3a8a 0%, transparent 40%),
+      radial-gradient(circle at 80% 70%, #4c1d95 0%, transparent 40%),
+      radial-gradient(circle at 50% 50%, #0c4a6e 0%, transparent 50%),
+      #050a16;
+  }
+  
+  .glass-card {
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--color-glass-border);
+  }
+
+  .glass-item {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+}
