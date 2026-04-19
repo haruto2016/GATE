@@ -126,6 +126,16 @@ async function startServer() {
           }
         });
 
+        // Handle Meta Refresh
+        text = text.replace(/<meta http-equiv=["']refresh["'] content=["'](\d+);\s*url=([^"']+)["']/gi, (match, delay, url) => {
+          try {
+             const absoluteUrl = new URL(url, base).href;
+             return `<meta http-equiv="refresh" content="${delay};url=${baseUrl}${encodeURIComponent(absoluteUrl)}">`;
+          } catch(e) {
+             return match;
+          }
+        });
+
         // Inject a comprehensive script to handle dynamic client-side fetches and URL resolution
         if (contentType.includes('text/html')) {
            // Strip subresource integrity attributes which will fail after rewriting
@@ -140,6 +150,10 @@ async function startServer() {
                function wrapUrl(url) {
                  if (!url || typeof url !== 'string') return url;
                  if (url.startsWith(proxyBase)) return url;
+                 if (url.startsWith('/') && !url.startsWith('//')) {
+                    // It's already relative but we need to make it absolute to internal target
+                    url = new URL(url, targetBase).href;
+                 }
                  if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:')) return url;
                  
                  try {
@@ -149,25 +163,6 @@ async function startServer() {
                    return url;
                  }
                }
-
-               // Proxy Location Object to trick site checks
-               const locationProxy = new Proxy(window.location, {
-                 get(target, prop) {
-                   if (prop === 'host' || prop === 'hostname') return new URL(targetBase).hostname;
-                   if (prop === 'origin') return new URL(targetBase).origin;
-                   if (prop === 'href') return targetBase;
-                   return target[prop];
-                 }
-               });
-
-               // Patch Worker to proxy worker scripts
-               const originalWorker = window.Worker;
-               window.Worker = function(scriptURL, options) {
-                 return new originalWorker(wrapUrl(scriptURL), options);
-               };
-
-               // Avoid ServiceWorkers as they conflict with proxying logic
-               navigator.serviceWorker.register = () => new Promise(() => {});
 
                // Patch Fetch
                const originalFetch = window.fetch;
@@ -187,73 +182,73 @@ async function startServer() {
                  return originalOpen.call(this, method, wrapUrl(url), ...args);
                };
 
-               // Patch common element creation
-               const proxiedTags = ['img', 'script', 'iframe', 'source', 'video', 'audio', 'link', 'embed', 'object'];
-               const originalCreateElement = document.createElement;
-               document.createElement = function(tagName, options) {
-                 const el = originalCreateElement.call(document, tagName, options);
-                 const lowerTag = tagName.toLowerCase();
-                 if (proxiedTags.includes(lowerTag)) {
-                   const attr = (lowerTag === 'link') ? 'href' : 'src';
-                   const originalSet = Object.getOwnPropertyDescriptor(HTMLElement.prototype, attr)?.set || 
-                              Object.getOwnPropertyDescriptor(el.constructor.prototype, attr)?.set;
-                   
-                   if (originalSet) {
-                     Object.defineProperty(el, attr, {
-                       set: function(val) {
-                         return originalSet.call(this, wrapUrl(val));
-                       }
-                     });
-                   }
-                 }
-                 return el;
+               // Patch window.open
+               const originalOpenWindow = window.open;
+               window.open = function(url, name, features) {
+                 return originalOpenWindow.call(window, wrapUrl(url), name, features);
                };
 
-               // Handle dynamically added background-images in inline styles
-               const originalSetAttribute = Element.prototype.setAttribute;
-               Element.prototype.setAttribute = function(name, value) {
-                 if (name === 'style' && value.includes('url(')) {
-                    value = value.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, content) => {
-                      return \`url("\${wrapUrl(content)}")\`;
-                    });
+               // MutationObserver to handle dynamic elements
+               const observer = new MutationObserver((mutations) => {
+                 mutations.forEach((mutation) => {
+                   mutation.addedNodes.forEach((node) => {
+                     if (node.nodeType === 1) {
+                       if (node.tagName === 'A') node.href = wrapUrl(node.href);
+                       if (node.tagName === 'FORM') patchForm(node);
+                       node.querySelectorAll?.('a').forEach(a => a.href = wrapUrl(a.href));
+                       node.querySelectorAll?.('form').forEach(f => patchForm(f));
+                     }
+                   });
+                 });
+               });
+               observer.observe(document.documentElement, { childList: true, subtree: true });
+
+               function patchForm(form) {
+                 const method = (form.getAttribute('method') || 'GET').toUpperCase();
+                 const action = form.getAttribute('action');
+                 if (action && !action.startsWith(proxyBase)) {
+                   const targetUrl = new URL(action, document.baseURI).href;
+                   if (method === 'GET') {
+                     let urlInput = form.querySelector('input[name="url"]');
+                     if (!urlInput) {
+                       urlInput = document.createElement('input');
+                       urlInput.setAttribute('type', 'hidden');
+                       urlInput.setAttribute('name', 'url');
+                       form.appendChild(urlInput);
+                     }
+                     urlInput.value = targetUrl;
+                     form.setAttribute('action', proxyBase.split('=')[0] + '=');
+                   } else {
+                     form.setAttribute('action', wrapUrl(action));
+                   }
                  }
-                 return originalSetAttribute.call(this, name, value);
-               };
+               }
 
                // Patch Form Submissions
                window.addEventListener('submit', function(e) {
                  const form = e.target;
                  if (form.tagName === 'FORM') {
-                   const method = (form.getAttribute('method') || 'GET').toUpperCase();
-                   const action = form.getAttribute('action');
-                   if (action && !action.startsWith(proxyBase)) {
-                     const targetUrl = new URL(action, document.baseURI).href;
-                     if (method === 'GET') {
-                       // For GET forms, append the target URL as a hidden input
-                       // to preserve it across navigation
-                       let urlInput = form.querySelector('input[name="url"]');
-                       if (!urlInput) {
-                         urlInput = document.createElement('input');
-                         urlInput.setAttribute('type', 'hidden');
-                         urlInput.setAttribute('name', 'url');
-                         form.appendChild(urlInput);
-                       }
-                       urlInput.value = targetUrl;
-                       form.setAttribute('action', '/api/proxy');
-                     } else {
-                       form.setAttribute('action', wrapUrl(action));
-                     }
-                   }
+                    patchForm(form);
                  }
                }, true);
 
-               // Intercept all link clicks to ensure they are proxied
+               // Intercept all link clicks
                window.addEventListener('click', function(e) {
                  const target = e.target.closest('a');
                  if (target && target.href && !target.href.startsWith(proxyBase) && !target.href.startsWith('javascript:') && !target.href.startsWith('#')) {
                    target.href = wrapUrl(target.href);
                  }
                }, true);
+
+               // Patch History
+               const originalPushState = history.pushState;
+               history.pushState = function(state, title, url) {
+                 return originalPushState.call(this, state, title, wrapUrl(url));
+               };
+               const originalReplaceState = history.replaceState;
+               history.replaceState = function(state, title, url) {
+                 return originalReplaceState.call(this, state, title, wrapUrl(url));
+               };
 
              })();
            </script>
