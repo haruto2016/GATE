@@ -8,7 +8,8 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Railway sets process.env.PORT
+  const PORT = process.env.PORT || 3000;
 
   // Proxy endpoint
   app.get('/api/proxy', async (req, res) => {
