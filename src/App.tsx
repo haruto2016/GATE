@@ -48,8 +48,8 @@ export default function App() {
     let resolved = targetUrl.trim();
     if (!resolved.startsWith('http')) {
       if (!resolved.includes('.') || resolved.includes(' ')) {
-        // Use Bing. Google and DuckDuckGo aggressively block datacenter proxy IPs.
-        resolved = `https://www.bing.com/search?q=${encodeURIComponent(resolved)}`;
+        // Yahoo! Japan Search is very robust, Japanese-native, and doesn't aggressively block proxies
+        resolved = `https://search.yahoo.co.jp/search?p=${encodeURIComponent(resolved)}`;
       } else {
         resolved = 'https://' + resolved;
       }
@@ -330,7 +330,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {[
-                    { name: 'Bing (Search)', url: 'bing.com' },
+                    { name: 'Yahoo!検索', url: 'search.yahoo.co.jp' },
                     { name: 'YouTube', url: 'youtube.com' },
                     { name: 'X', url: 'x.com' },
                     { name: 'Wikipedia', url: 'wikipedia.org' }

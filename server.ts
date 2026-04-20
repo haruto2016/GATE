@@ -134,25 +134,26 @@ async function startServer() {
 
         if (isJs || isHtml) {
            // For SPAs (Next.js/React) we MUST patch their client-side router reading window.location
+           // Use negative lookahead (?!\s*=(?!=)) to avoid breaking assignments (e.g. location.href = "...")
            const pName = base.pathname === '/' ? '/' : base.pathname;
-           text = text.replace(/window\.location\.pathname/g, `"${pName}"`);
-           text = text.replace(/(?<!\w)location\.pathname/g, `"${pName}"`);
+           text = text.replace(/window\.location\.pathname(?!\s*=(?!=))/g, `"${pName}"`);
+           text = text.replace(/(?<!\w)location\.pathname(?!\s*=(?!=))/g, `"${pName}"`);
            
-           text = text.replace(/window\.location\.hostname/g, `"${base.hostname}"`);
-           text = text.replace(/(?<!\w)location\.hostname/g, `"${base.hostname}"`);
+           text = text.replace(/window\.location\.hostname(?!\s*=(?!=))/g, `"${base.hostname}"`);
+           text = text.replace(/(?<!\w)location\.hostname(?!\s*=(?!=))/g, `"${base.hostname}"`);
            
-           text = text.replace(/window\.location\.host/g, `"${base.host}"`);
-           text = text.replace(/(?<!\w)location\.host/g, `"${base.host}"`);
+           text = text.replace(/window\.location\.host(?!\s*=(?!=))/g, `"${base.host}"`);
+           text = text.replace(/(?<!\w)location\.host(?!\s*=(?!=))/g, `"${base.host}"`);
 
-           text = text.replace(/window\.location\.origin/g, `"${base.origin}"`);
-           text = text.replace(/(?<!\w)location\.origin/g, `"${base.origin}"`);
+           text = text.replace(/window\.location\.origin(?!\s*=(?!=))/g, `"${base.origin}"`);
+           text = text.replace(/(?<!\w)location\.origin(?!\s*=(?!=))/g, `"${base.origin}"`);
         }
 
         if (isJs) {
-           text = text.replace(/window\.location\.href/g, `"${base.href}"`);
-           text = text.replace(/(?<!\w)location\.href/g, `"${base.href}"`);
-           text = text.replace(/window\.location\.search/g, `"${base.search}"`);
-           text = text.replace(/(?<!\w)location\.search/g, `"${base.search}"`);
+           text = text.replace(/window\.location\.href(?!\s*=(?!=))/g, `"${base.href}"`);
+           text = text.replace(/(?<!\w)location\.href(?!\s*=(?!=))/g, `"${base.href}"`);
+           text = text.replace(/window\.location\.search(?!\s*=(?!=))/g, `"${base.search}"`);
+           text = text.replace(/(?<!\w)location\.search(?!\s*=(?!=))/g, `"${base.search}"`);
         }
 
         if (isHtml || isCss) {
