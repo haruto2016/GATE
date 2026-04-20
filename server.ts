@@ -159,14 +159,27 @@ async function startServer() {
                const proxyBase = "${baseUrl}";
                const targetBase = "${resolvedUrl}";
                
-               function wrapUrl(url) {
+               function wrapUrl(url, originalNodeAttr = null) {
                  if (!url || typeof url !== 'string') return url;
-                 if (url.startsWith(proxyBase)) return url;
+                 if (url.includes(proxyBase)) return url;
                  if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('mailto:')) return url;
                  
                  try {
-                   // Always resolve relative to the original target base, not the proxy's document.baseURI
-                   const absoluteUrl = new URL(url, targetBase).href;
+                   // If the URL is already absolute but points to the proxy's origin incorrectly, or if it's relative
+                   // we should prefer the raw attribute value to resolve against targetBase
+                   let urlToResolve = originalNodeAttr || url;
+                   // If it's an absolute URL that doesn't belong to our proxy origin and isn't relative
+                   if (urlToResolve.startsWith('http') && !urlToResolve.startsWith(window.location.origin)) {
+                     return proxyBase + encodeURIComponent(urlToResolve);
+                   }
+                   
+                   // Resolve relative Paths against the Target domain, not proxy
+                   let pathToResolve = urlToResolve;
+                   if (pathToResolve.startsWith(window.location.origin)) {
+                     pathToResolve = pathToResolve.substring(window.location.origin.length);
+                   }
+                   
+                   const absoluteUrl = new URL(pathToResolve, targetBase).href;
                    return proxyBase + encodeURIComponent(absoluteUrl);
                  } catch(e) {
                    return url;
@@ -202,9 +215,13 @@ async function startServer() {
                  mutations.forEach((mutation) => {
                    mutation.addedNodes.forEach((node) => {
                      if (node.nodeType === 1) {
-                       if (node.tagName === 'A') node.href = wrapUrl(node.href);
+                       if (node.tagName === 'A' && node.hasAttribute('href')) {
+                         node.href = wrapUrl(node.href, node.getAttribute('href'));
+                       }
                        if (node.tagName === 'FORM') patchForm(node);
-                       node.querySelectorAll?.('a').forEach(a => a.href = wrapUrl(a.href));
+                       node.querySelectorAll?.('a').forEach(a => {
+                         if(a.hasAttribute('href')) a.href = wrapUrl(a.href, a.getAttribute('href'));
+                       });
                        node.querySelectorAll?.('form').forEach(f => patchForm(f));
                      }
                    });
@@ -218,7 +235,7 @@ async function startServer() {
                  let targetFormUrl = targetBase;
 
                  // If action is already proxied (via HTML regex rewrite), extract the true target
-                 if (action.startsWith(proxyBase)) {
+                 if (action.includes(proxyBase)) {
                    try {
                      const urlObj = new URL(action, window.location.origin);
                      targetFormUrl = urlObj.searchParams.get('url') || targetBase;
@@ -243,8 +260,8 @@ async function startServer() {
                    form.setAttribute('action', '/api/proxy'); // Clean proxy endpoint
                  } else {
                    // For POST forms, query parameters in the action URL are preserved.
-                   if (action && !action.startsWith(proxyBase)) {
-                     form.setAttribute('action', wrapUrl(action));
+                   if (action && !action.includes(proxyBase)) {
+                     form.setAttribute('action', wrapUrl(form.action, action));
                    }
                  }
                }
@@ -260,8 +277,11 @@ async function startServer() {
                // Intercept all link clicks
                window.addEventListener('click', function(e) {
                  const target = e.target.closest('a');
-                 if (target && target.href && !target.href.startsWith(proxyBase) && !target.href.startsWith('javascript:') && !target.href.startsWith('#')) {
-                   target.href = wrapUrl(target.href);
+                 if (target && target.hasAttribute('href')) {
+                   const rawHref = target.getAttribute('href');
+                   if (!rawHref.includes(proxyBase) && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+                     target.href = wrapUrl(target.href, rawHref);
+                   }
                  }
                }, true);
 
