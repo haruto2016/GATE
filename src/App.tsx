@@ -48,8 +48,8 @@ export default function App() {
     let resolved = targetUrl.trim();
     if (!resolved.startsWith('http')) {
       if (!resolved.includes('.') || resolved.includes(' ')) {
-        // Use DuckDuckGo instead of Google to avoid strict bot detection from datacenter IPs
-        resolved = `https://duckduckgo.com/?q=${encodeURIComponent(resolved)}`;
+        // Use HTML-only DuckDuckGo to avoid client-side API proxy errors and bot blocks
+        resolved = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(resolved)}`;
       } else {
         resolved = 'https://' + resolved;
       }
@@ -330,7 +330,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {[
-                    { name: 'DuckDuckGo', url: 'duckduckgo.com' },
+                    { name: 'DuckDuckGo', url: 'html.duckduckgo.com/html' },
                     { name: 'YouTube', url: 'youtube.com' },
                     { name: 'X', url: 'x.com' },
                     { name: 'Wikipedia', url: 'wikipedia.org' }
