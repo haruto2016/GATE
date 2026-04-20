@@ -123,17 +123,45 @@ async function startServer() {
       res.removeHeader('X-Frame-Options');
       res.removeHeader('Content-Security-Policy');
 
-      if (contentType.includes('text/html') || contentType.includes('text/css')) {
+      const isHtml = contentType.includes('text/html');
+      const isCss = contentType.includes('text/css');
+      const isJs = contentType.includes('javascript') || contentType.includes('x-javascript') || contentType.includes('ecmascript');
+
+      if (isHtml || isCss || isJs) {
         let text = await response.text();
         const base = new URL(resolvedUrl);
-
-        // Basic link rewriting for HTML/CSS
-        // Use a relative path for the base URL to ensure it works behind the AI Studio proxy
         const baseUrl = '/api/proxy?url=';
-        
-        // Regex to find attributes like src="...", href="..."
-        // This targets typical HTML/CSS URL patterns
-        text = text.replace(/(src|href|action)=["']([^"']+)["']/gi, (match, attr, content) => {
+
+        if (isJs || isHtml) {
+           // For SPAs (Next.js/React) we MUST patch their client-side router reading window.location
+           const pName = base.pathname === '/' ? '/' : base.pathname;
+           text = text.replace(/window\.location\.pathname/g, `"${pName}"`);
+           text = text.replace(/(?<!\w)location\.pathname/g, `"${pName}"`);
+           
+           text = text.replace(/window\.location\.hostname/g, `"${base.hostname}"`);
+           text = text.replace(/(?<!\w)location\.hostname/g, `"${base.hostname}"`);
+           
+           text = text.replace(/window\.location\.host/g, `"${base.host}"`);
+           text = text.replace(/(?<!\w)location\.host/g, `"${base.host}"`);
+
+           text = text.replace(/window\.location\.origin/g, `"${base.origin}"`);
+           text = text.replace(/(?<!\w)location\.origin/g, `"${base.origin}"`);
+        }
+
+        if (isJs) {
+           text = text.replace(/window\.location\.href/g, `"${base.href}"`);
+           text = text.replace(/(?<!\w)location\.href/g, `"${base.href}"`);
+           text = text.replace(/window\.location\.search/g, `"${base.search}"`);
+           text = text.replace(/(?<!\w)location\.search/g, `"${base.search}"`);
+        }
+
+        if (isHtml || isCss) {
+          // Basic link rewriting for HTML/CSS
+          // Use a relative path for the base URL to ensure it works behind the AI Studio proxy
+          
+          // Regex to find attributes like src="...", href="..."
+          // This targets typical HTML/CSS URL patterns
+          text = text.replace(/(src|href|action)=["']([^"']+)["']/gi, (match, attr, content) => {
           try {
             // Skip data URIs and anchor links
             if (content.startsWith('data:') || content.startsWith('#') || content.startsWith('javascript:')) {
@@ -158,18 +186,19 @@ async function startServer() {
           }
         });
 
-        // Handle Meta Refresh
-        text = text.replace(/<meta http-equiv=["']refresh["'] content=["'](\d+);\s*url=([^"']+)["']/gi, (match, delay, url) => {
-          try {
-             const absoluteUrl = new URL(url, base).href;
-             return `<meta http-equiv="refresh" content="${delay};url=${baseUrl}${encodeURIComponent(absoluteUrl)}">`;
-          } catch(e) {
-             return match;
-          }
-        });
+        }
 
-        // Inject a comprehensive script to handle dynamic client-side fetches and URL resolution
-        if (contentType.includes('text/html')) {
+        if (isHtml) {
+          // Handle Meta Refresh
+          text = text.replace(/<meta http-equiv=["']refresh["'] content=["'](\d+);\s*url=([^"']+)["']/gi, (match, delay, url) => {
+            try {
+               const absoluteUrl = new URL(url, base).href;
+               return `<meta http-equiv="refresh" content="${delay};url=${baseUrl}${encodeURIComponent(absoluteUrl)}">`;
+            } catch(e) {
+               return match;
+            }
+          });
+
            // Strip subresource integrity attributes which will fail after rewriting
            text = text.replace(/\sintegrity=["'][^"']+["']/gi, '');
 
