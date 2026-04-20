@@ -61,14 +61,25 @@ async function startServer() {
         resolvedUrl = 'https://' + resolvedUrl;
       }
 
+      const proxyHeaders: Record<string, string> = {
+        'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept-Language': (req.headers['accept-language'] as string) || 'ja,ja-JP;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'identity',
+      };
+      
+      // Crucial for video streaming (skip forward/backward and segment loading)
+      if (req.headers.range) {
+        proxyHeaders.Range = req.headers.range as string;
+      }
+
       const response = await fetch(resolvedUrl, {
-        headers: {
-          'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-          'Accept-Encoding': 'identity',
-        },
+        headers: proxyHeaders,
       });
 
       const contentType = response.headers.get('content-type') || '';
+      
+      // Preserve the specific status code (e.g., 206 Partial Content for videos)
+      res.status(response.status);
       
       // Copy essential headers but strip security ones that prevent framing
       res.set('Content-Type', contentType);
@@ -151,14 +162,11 @@ async function startServer() {
                function wrapUrl(url) {
                  if (!url || typeof url !== 'string') return url;
                  if (url.startsWith(proxyBase)) return url;
-                 if (url.startsWith('/') && !url.startsWith('//')) {
-                    // It's already relative but we need to make it absolute to internal target
-                    url = new URL(url, targetBase).href;
-                 }
-                 if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:')) return url;
+                 if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('mailto:')) return url;
                  
                  try {
-                   const absoluteUrl = new URL(url, document.baseURI).href;
+                   // Always resolve relative to the original target base, not the proxy's document.baseURI
+                   const absoluteUrl = new URL(url, targetBase).href;
                    return proxyBase + encodeURIComponent(absoluteUrl);
                  } catch(e) {
                    return url;
@@ -206,20 +214,36 @@ async function startServer() {
 
                function patchForm(form) {
                  const method = (form.getAttribute('method') || 'GET').toUpperCase();
-                 const action = form.getAttribute('action');
-                 if (action && !action.startsWith(proxyBase)) {
-                   const targetUrl = new URL(action, document.baseURI).href;
-                   if (method === 'GET') {
-                     let urlInput = form.querySelector('input[name="url"]');
-                     if (!urlInput) {
-                       urlInput = document.createElement('input');
-                       urlInput.setAttribute('type', 'hidden');
-                       urlInput.setAttribute('name', 'url');
-                       form.appendChild(urlInput);
-                     }
-                     urlInput.value = targetUrl;
-                     form.setAttribute('action', proxyBase.split('=')[0] + '=');
-                   } else {
+                 let action = form.getAttribute('action') || '';
+                 let targetFormUrl = targetBase;
+
+                 // If action is already proxied (via HTML regex rewrite), extract the true target
+                 if (action.startsWith(proxyBase)) {
+                   try {
+                     const urlObj = new URL(action, window.location.origin);
+                     targetFormUrl = urlObj.searchParams.get('url') || targetBase;
+                   } catch(e) {}
+                 } else if (action) {
+                   try {
+                     targetFormUrl = new URL(action, targetBase).href;
+                   } catch(e) {}
+                 }
+
+                 if (method === 'GET') {
+                   // For GET forms, the browser will strip any query param in the action attribute.
+                   // We MUST add the url as a hidden input.
+                   let urlInput = form.querySelector('input[name="url"]');
+                   if (!urlInput) {
+                     urlInput = document.createElement('input');
+                     urlInput.setAttribute('type', 'hidden');
+                     urlInput.setAttribute('name', 'url');
+                     form.prepend(urlInput);
+                   }
+                   urlInput.value = targetFormUrl;
+                   form.setAttribute('action', '/api/proxy'); // Clean proxy endpoint
+                 } else {
+                   // For POST forms, query parameters in the action URL are preserved.
+                   if (action && !action.startsWith(proxyBase)) {
                      form.setAttribute('action', wrapUrl(action));
                    }
                  }
@@ -260,9 +284,15 @@ async function startServer() {
 
         res.send(text);
       } else {
-        // For binary data (images, etc.), pipe the stream
-        const buffer = await response.arrayBuffer();
-        res.send(Buffer.from(buffer));
+        // For binary data (images, video, audio), pipe the stream instead of loading all into memory
+        if (response.body) {
+          const { Readable } = await import('stream');
+          // @ts-ignore
+          Readable.fromWeb(response.body).pipe(res);
+        } else {
+          const buffer = await response.arrayBuffer();
+          res.send(Buffer.from(buffer));
+        }
       }
     } catch (error: any) {
       console.error('Proxy error:', error);

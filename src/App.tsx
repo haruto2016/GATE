@@ -48,10 +48,51 @@ export default function App() {
     let resolved = targetUrl.trim();
     if (!resolved.startsWith('http')) {
       if (!resolved.includes('.') || resolved.includes(' ')) {
-        resolved = `https://www.google.com/search?q=${encodeURIComponent(resolved)}`;
+        // Use DuckDuckGo instead of Google to avoid strict bot detection from datacenter IPs
+        resolved = `https://duckduckgo.com/?q=${encodeURIComponent(resolved)}`;
       } else {
         resolved = 'https://' + resolved;
       }
+    }
+
+    // Special YouTube handling: Use Embed API or Alternative Frontend
+    if (resolved.includes('youtube.com/watch') || resolved.includes('youtu.be/')) {
+       // Extract video ID
+       let videoId = '';
+       if (resolved.includes('youtu.be/')) {
+         videoId = resolved.split('youtu.be/')[1]?.split('?')[0];
+       } else {
+         const urlObj = new URL(resolved);
+         videoId = urlObj.searchParams.get('v') || '';
+       }
+
+       if (videoId) {
+         // Bypass the internal proxy and use YouTube's official nocookie embed or Invidious
+         // We use youtube-nocookie.com to minimize tracking while bypassing proxy blocks
+         const embedUrl = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1`;
+         setCurrentUrl(embedUrl);
+         setUrlInput(resolved);
+         setIsLoading(true);
+         
+         if (!history.includes(resolved)) {
+           setHistory(prev => [resolved, ...prev.slice(0, 9)]);
+         }
+         return;
+       }
+    }
+
+    // Also offer alternative routing for generic YouTube links
+    if (resolved.includes('youtube.com') && !resolved.includes('youtube-nocookie.com')) {
+        resolved = resolved.replace('youtube.com', 'piped.video');
+        // We MUST route piped.video through the proxy to strip X-Frame-Options
+        const alternativeProxyUrl = `/api/proxy?url=${encodeURIComponent(resolved)}`;
+        setCurrentUrl(alternativeProxyUrl);
+        setUrlInput(resolved);
+        setIsLoading(true);
+        if (!history.includes(resolved)) {
+           setHistory(prev => [resolved, ...prev.slice(0, 9)]);
+        }
+        return;
     }
 
     const proxyUrl = `/api/proxy?url=${encodeURIComponent(resolved)}`;
@@ -289,7 +330,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {[
-                    { name: 'Google', url: 'google.com' },
+                    { name: 'DuckDuckGo', url: 'duckduckgo.com' },
                     { name: 'YouTube', url: 'youtube.com' },
                     { name: 'X', url: 'x.com' },
                     { name: 'Wikipedia', url: 'wikipedia.org' }
