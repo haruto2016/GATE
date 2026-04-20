@@ -61,10 +61,26 @@ async function startServer() {
         resolvedUrl = 'https://' + resolvedUrl;
       }
 
+      let proxyReferer = resolvedUrl;
+      let proxyOrigin = new URL(resolvedUrl).origin;
+
+      if (req.headers.referer && req.headers.referer.includes('/api/proxy?url=')) {
+        try {
+          const proxyRefUrl = new URL(req.headers.referer);
+          const originalRef = proxyRefUrl.searchParams.get('url');
+          if (originalRef) {
+            proxyReferer = originalRef;
+            proxyOrigin = new URL(originalRef).origin;
+          }
+        } catch(e) {}
+      }
+
       const proxyHeaders: Record<string, string> = {
         'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept-Language': (req.headers['accept-language'] as string) || 'ja,ja-JP;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept-Encoding': 'identity',
+        'Referer': proxyReferer,
+        'Origin': proxyOrigin
       };
       
       // Crucial for video streaming (skip forward/backward and segment loading)
@@ -72,9 +88,13 @@ async function startServer() {
         proxyHeaders.Range = req.headers.range as string;
       }
 
-      const response = await fetch(resolvedUrl, {
-        headers: proxyHeaders,
-      });
+      let response;
+      try {
+        response = await fetch(resolvedUrl, { headers: proxyHeaders });
+      } catch (networkError: any) {
+        // Many ad blockers or CDNs simply drop the connection
+        return res.status(502).send(`Bad Gateway: Could not reach ${resolvedUrl}`);
+      }
 
       const contentType = response.headers.get('content-type') || '';
       
@@ -202,6 +222,32 @@ async function startServer() {
                const originalOpen = XMLHttpRequest.prototype.open;
                XMLHttpRequest.prototype.open = function(method, url, ...args) {
                  return originalOpen.call(this, method, wrapUrl(url), ...args);
+               };
+
+               // Patch document.createElement to catch dynamic scripts, images, and iframes (Crucial for HTML5 games)
+               const originalCreateElement = document.createElement;
+               document.createElement = function(tagName) {
+                 const element = originalCreateElement.call(document, tagName);
+                 if (tagName.toLowerCase() === 'script' || tagName.toLowerCase() === 'img' || tagName.toLowerCase() === 'iframe') {
+                   const originalSetAttribute = element.setAttribute;
+                   element.setAttribute = function(name, value) {
+                     if (name === 'src' || name === 'href') {
+                       value = wrapUrl(value);
+                     }
+                     return originalSetAttribute.call(this, name, value);
+                   };
+                   
+                   // Intercept property assignments
+                   Object.defineProperty(element, 'src', {
+                     set: function(val) {
+                       originalSetAttribute.call(this, 'src', wrapUrl(val));
+                     },
+                     get: function() {
+                       return this.getAttribute('src');
+                     }
+                   });
+                 }
+                 return element;
                };
 
                // Patch window.open
