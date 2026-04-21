@@ -27,7 +27,10 @@ async function startServer() {
         if (encodedTargetUrl) {
           let targetUrl = encodedTargetUrl;
           if (!targetUrl.startsWith('http')) {
-            try { targetUrl = Buffer.from(targetUrl, 'base64').toString('utf-8'); } catch(e) {}
+            try { 
+              const normalized = targetUrl.trim().replace(/ /g, '+');
+              targetUrl = Buffer.from(normalized, 'base64').toString('utf-8'); 
+            } catch(e) {}
           }
           
           if (targetUrl.startsWith('http')) {
@@ -53,9 +56,11 @@ async function startServer() {
     }
 
     // Attempt to decode targetUrl as base64 if it does not look like HTTP.
-    if (!targetUrl.startsWith('http') && targetUrl.length > 10) {
+    if (targetUrl && !targetUrl.startsWith('http') && targetUrl.length > 5) {
       try {
-        const decoded = Buffer.from(targetUrl, 'base64').toString('utf-8');
+        // Express converts '+' to ' ' in query params. We need '+' for base64.
+        const normalized = targetUrl.trim().replace(/ /g, '+');
+        const decoded = Buffer.from(normalized, 'base64').toString('utf-8');
         if (decoded.startsWith('http')) {
           targetUrl = decoded;
         }
@@ -93,7 +98,8 @@ async function startServer() {
           if (originalRef) {
             if (!originalRef.startsWith('http')) {
               try {
-                originalRef = Buffer.from(originalRef, 'base64').toString('utf-8');
+                const normalized = originalRef.trim().replace(/ /g, '+');
+                originalRef = Buffer.from(normalized, 'base64').toString('utf-8');
               } catch(e) {}
             }
             if (originalRef && originalRef.startsWith('http')) {
@@ -171,7 +177,8 @@ async function startServer() {
         'content-security-policy-report-only',
         'content-encoding', // Let Express handle compression/encoding
         'content-length',   // Length changes after rewriting
-        'transfer-encoding'
+        'transfer-encoding',
+        'access-control-allow-origin' // Prevent target CORS from interfering with our framing
       ];
       response.headers.forEach((value, key) => {
         const lowerKey = key.toLowerCase();
