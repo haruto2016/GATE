@@ -11,8 +11,8 @@ async function startServer() {
   // Railway sets process.env.PORT
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // Proxy endpoint
-  app.get('/api/proxy', async (req, res) => {
+  // Proxy endpoint handles all HTTP methods (GET, POST, etc.) for AJAX compatibility
+  app.all('/api/proxy', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
     let targetUrl = req.query.url as string;
 
     // Try to recover target URL from Referer if missing from query
@@ -75,22 +75,40 @@ async function startServer() {
         } catch(e) {}
       }
 
-      const proxyHeaders: Record<string, string> = {
-        'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept-Language': (req.headers['accept-language'] as string) || 'ja,ja-JP;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'identity',
-        'Referer': proxyReferer,
-        'Origin': proxyOrigin
+      const proxyHeaders: Record<string, string> = {};
+      
+      // Copy over all safe headers from the original request
+      Object.entries(req.headers).forEach(([key, value]) => {
+        const lowerKey = key.toLowerCase();
+        if (!['host', 'connection', 'content-length', 'accept-encoding'].includes(lowerKey)) {
+          if (Array.isArray(value)) {
+            proxyHeaders[lowerKey] = value.join(', ');
+          } else if (value) {
+            proxyHeaders[lowerKey] = value;
+          }
+        }
+      });
+      
+      // Guarantee User-Agent, Referer, Origin
+      proxyHeaders['User-Agent'] = (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+      proxyHeaders['Referer'] = proxyReferer;
+      proxyHeaders['Origin'] = proxyOrigin;
+      // We process responses in node, so ask for uncompressed (or let undici handle gzip via auto)
+      proxyHeaders['Accept-Encoding'] = 'gzip, deflate'; 
+      
+      const fetchOptions: RequestInit = {
+        method: req.method,
+        headers: proxyHeaders,
+        redirect: 'manual' // Handle redirects manually if needed, or follow. Undici follows up to 20 by default unless manual
       };
       
-      // Crucial for video streaming (skip forward/backward and segment loading)
-      if (req.headers.range) {
-        proxyHeaders.Range = req.headers.range as string;
+      if (req.method !== 'GET' && req.method !== 'HEAD' && Buffer.isBuffer(req.body) && req.body.length > 0) {
+        fetchOptions.body = req.body;
       }
 
       let response;
       try {
-        response = await fetch(resolvedUrl, { headers: proxyHeaders });
+        response = await fetch(resolvedUrl, fetchOptions);
       } catch (networkError: any) {
         // Many ad blockers or CDNs simply drop the connection
         return res.status(502).send(`Bad Gateway: Could not reach ${resolvedUrl}`);
@@ -115,8 +133,19 @@ async function startServer() {
         'transfer-encoding'
       ];
       response.headers.forEach((value, key) => {
-        if (!headersToStrip.includes(key.toLowerCase())) {
-          res.set(key, value);
+        const lowerKey = key.toLowerCase();
+        if (!headersToStrip.includes(lowerKey)) {
+          if (lowerKey === 'location') {
+            // Rewrite redirects to stay inside the proxy
+            try {
+              const redirectUrl = new URL(value, resolvedUrl).href;
+              res.set(key, `/api/proxy?url=${encodeURIComponent(redirectUrl)}`);
+            } catch (e) {
+              res.set(key, value);
+            }
+          } else {
+            res.set(key, value);
+          }
         }
       });
       // Explicitly unset frame options just in case
@@ -133,27 +162,38 @@ async function startServer() {
         const baseUrl = '/api/proxy?url=';
 
         if (isJs || isHtml) {
-           // For SPAs (Next.js/React) we MUST patch their client-side router reading window.location
-           // Use negative lookahead (?!\s*=(?!=)) to avoid breaking assignments (e.g. location.href = "...")
-           const pName = base.pathname === '/' ? '/' : base.pathname;
-           text = text.replace(/window\.location\.pathname(?!\s*=(?!=))/g, `"${pName}"`);
-           text = text.replace(/(?<!\w)location\.pathname(?!\s*=(?!=))/g, `"${pName}"`);
+           // For SPAs (Next.js/React/Bing) we MUST patch their client-side router reading window.location
+           // Instead of static strings that break History API (like Bing SERP), we use a dynamic proxy object `__px_loc`
            
-           text = text.replace(/window\.location\.hostname(?!\s*=(?!=))/g, `"${base.hostname}"`);
-           text = text.replace(/(?<!\w)location\.hostname(?!\s*=(?!=))/g, `"${base.hostname}"`);
+           // We'll inject `__px_loc` definition in HTML
+           text = text.replace(/window\.location\.pathname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.pathname : window.location.pathname)`);
+           text = text.replace(/(?<!\w|\.)location\.pathname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.pathname : location.pathname)`);
            
-           text = text.replace(/window\.location\.host(?!\s*=(?!=))/g, `"${base.host}"`);
-           text = text.replace(/(?<!\w)location\.host(?!\s*=(?!=))/g, `"${base.host}"`);
+           text = text.replace(/window\.location\.hostname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.hostname : window.location.hostname)`);
+           text = text.replace(/(?<!\w|\.)location\.hostname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.hostname : location.hostname)`);
+           
+           text = text.replace(/window\.location\.host(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.host : window.location.host)`);
+           text = text.replace(/(?<!\w|\.)location\.host(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.host : location.host)`);
 
-           text = text.replace(/window\.location\.origin(?!\s*=(?!=))/g, `"${base.origin}"`);
-           text = text.replace(/(?<!\w)location\.origin(?!\s*=(?!=))/g, `"${base.origin}"`);
-        }
-
-        if (isJs) {
-           text = text.replace(/window\.location\.href(?!\s*=(?!=))/g, `"${base.href}"`);
-           text = text.replace(/(?<!\w)location\.href(?!\s*=(?!=))/g, `"${base.href}"`);
-           text = text.replace(/window\.location\.search(?!\s*=(?!=))/g, `"${base.search}"`);
-           text = text.replace(/(?<!\w)location\.search(?!\s*=(?!=))/g, `"${base.search}"`);
+           text = text.replace(/window\.location\.origin(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.origin : window.location.origin)`);
+           text = text.replace(/(?<!\w|\.)location\.origin(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.origin : location.origin)`);
+           
+           text = text.replace(/window\.location\.href(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.href : window.location.href)`);
+           text = text.replace(/(?<!\w|\.)location\.href(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.href : location.href)`);
+           
+           text = text.replace(/window\.location\.search(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.search : window.location.search)`);
+           text = text.replace(/(?<!\w|\.)location\.search(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.search : location.search)`);
+           
+           // Intercept location modifications safely without breaking parentheses
+           text = text.replace(/(?<!\w|\.)location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : location.replace)(');
+           text = text.replace(/window\.location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window.location.replace)(');
+           text = text.replace(/(?<!\w|\.)location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : location.assign)(');
+           text = text.replace(/window\.location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window.location.assign)(');
+           
+           // Intercept href assignments (e.g. location.href = "...")
+           // We do a best-effort simple regex to catch the most common pattern
+           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*(['"][^'"]+['"])/g, 'location.href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
+           text = text.replace(/window\.location\.href\s*=\s*(['"][^'"]+['"])/g, 'window.location.href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
         }
 
         if (isHtml || isCss) {
@@ -208,6 +248,7 @@ async function startServer() {
              (function() {
                const proxyBase = "${baseUrl}";
                const targetBase = "${resolvedUrl}";
+               const targetUrlObj = new URL(targetBase);
                
                function wrapUrl(url, originalNodeAttr = null) {
                  if (!url || typeof url !== 'string') return url;
@@ -235,6 +276,27 @@ async function startServer() {
                    return url;
                  }
                }
+               
+               // Create dynamic location proxy object
+               window.__px_loc = {
+                 get pathname() { return targetUrlObj.pathname === '/' ? '/' : targetUrlObj.pathname; },
+                 get hostname() { return targetUrlObj.hostname; },
+                 get host() { return targetUrlObj.host; },
+                 get origin() { return targetUrlObj.origin; },
+                 get search() { return targetUrlObj.search; },
+                 get href() {
+                    // Try to rebuild the original URL if history API changed the proxy url params
+                    try {
+                       const currentUrl = new URL(window.location.href);
+                       const realUrlParam = currentUrl.searchParams.get('url');
+                       if (realUrlParam) return realUrlParam;
+                    } catch(e) {}
+                    return targetBase;
+                 },
+                 wrapUrl: wrapUrl,
+                 doReplace: function(url) { window.location.replace(wrapUrl(url)); },
+                 doAssign: function(url) { window.location.assign(wrapUrl(url)); }
+               };
 
                // Patch Fetch
                const originalFetch = window.fetch;
