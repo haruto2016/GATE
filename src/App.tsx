@@ -30,8 +30,8 @@ export default function App() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    // Check if the internal proxy is available
-    fetch('/api/proxy?url=https://www.google.com')
+    // Check if the internal proxy is available. Use a base64 encoded URL to prevent DPI blocking
+    fetch(`/api/proxy?url=${btoa('https://www.google.com')}`)
       .then(res => {
         if (!res.ok && res.status === 404) {
           setProxyError('Backend Proxy not found. If you are on GitHub Pages, please note that static hosting does not support the required Node.js server.');
@@ -85,7 +85,7 @@ export default function App() {
     if (resolved.includes('youtube.com') && !resolved.includes('youtube-nocookie.com')) {
         resolved = resolved.replace('youtube.com', 'piped.video');
         // We MUST route piped.video through the proxy to strip X-Frame-Options
-        const alternativeProxyUrl = `/api/proxy?url=${encodeURIComponent(resolved)}`;
+        const alternativeProxyUrl = `/api/proxy?url=${encodeURIComponent(btoa(unescape(encodeURIComponent(resolved))))}`;
         setCurrentUrl(alternativeProxyUrl);
         setUrlInput(resolved);
         setIsLoading(true);
@@ -95,7 +95,7 @@ export default function App() {
         return;
     }
 
-    const proxyUrl = `/api/proxy?url=${encodeURIComponent(resolved)}`;
+    const proxyUrl = `/api/proxy?url=${encodeURIComponent(btoa(unescape(encodeURIComponent(resolved))))}`;
     setCurrentUrl(proxyUrl);
     setUrlInput(resolved);
     setIsLoading(true);

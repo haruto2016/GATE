@@ -11,35 +11,57 @@ async function startServer() {
   // Railway sets process.env.PORT
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+  // Global Interceptor for leaked requests from the iframe
+  // If an un-rewritten relative link is clicked or asset is loaded, it hits the server root (e.g. /category/sound).
+  // But the browser will send the proxy URL in the Referer header! We can recover the target and redirect.
+  app.use((req, res, next) => {
+    if (req.url.startsWith('/api/proxy') || req.url.startsWith('/@') || req.url.startsWith('/src') || req.url.startsWith('/node_modules')) {
+      return next();
+    }
+
+    if (req.headers.referer && req.headers.referer.includes('/api/proxy?url=')) {
+      try {
+        const refererUrl = new URL(req.headers.referer);
+        const encodedTargetUrl = refererUrl.searchParams.get('url');
+        
+        if (encodedTargetUrl) {
+          let targetUrl = encodedTargetUrl;
+          if (!targetUrl.startsWith('http')) {
+            try { targetUrl = Buffer.from(targetUrl, 'base64').toString('utf-8'); } catch(e) {}
+          }
+          
+          if (targetUrl.startsWith('http')) {
+            const baseTarget = new URL(targetUrl);
+            const recoveredAbsoluteUrl = new URL(req.url, baseTarget).href;
+            const b64 = Buffer.from(recoveredAbsoluteUrl, 'utf-8').toString('base64');
+            return res.redirect(`/api/proxy?url=${encodeURIComponent(b64)}`);
+          }
+        }
+      } catch (e) {
+        // Fallthrough if recovery fails
+      }
+    }
+    next();
+  });
+
   // Proxy endpoint handles all HTTP methods (GET, POST, etc.) for AJAX compatibility
   app.all('/api/proxy', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
     let targetUrl = req.query.url as string;
 
-    // Try to recover target URL from Referer if missing from query
-    if (!targetUrl && req.headers.referer) {
-      try {
-        const refererUrl = new URL(req.headers.referer);
-        const prevTargetUrl = refererUrl.searchParams.get('url');
-        if (prevTargetUrl) {
-          // Reconstruct the intended URL by combining previous target base and current query
-          const baseTarget = new URL(prevTargetUrl);
-          const currentPath = req.url.split('?')[0]; // Likely /api/proxy
-          // If the request was for a relative path on the target site
-          const queryParams = { ...req.query };
-          const newTargetUrl = new URL(baseTarget.origin);
-          newTargetUrl.pathname = baseTarget.pathname;
-          Object.entries(queryParams).forEach(([key, value]) => {
-            newTargetUrl.searchParams.append(key, value as string);
-          });
-          targetUrl = newTargetUrl.href;
-        }
-      } catch (e) {
-        console.error('Referer recovery failed:', e);
-      }
-    }
-
     if (!targetUrl) {
       return res.status(400).send('URL is required');
+    }
+
+    // Attempt to decode targetUrl as base64 if it does not look like HTTP.
+    if (!targetUrl.startsWith('http') && targetUrl.length > 10) {
+      try {
+        const decoded = Buffer.from(targetUrl, 'base64').toString('utf-8');
+        if (decoded.startsWith('http')) {
+          targetUrl = decoded;
+        }
+      } catch (e) {
+        // Not valid base64
+      }
     }
 
     // Append other query parameters back to targetUrl
@@ -67,10 +89,17 @@ async function startServer() {
       if (req.headers.referer && req.headers.referer.includes('/api/proxy?url=')) {
         try {
           const proxyRefUrl = new URL(req.headers.referer);
-          const originalRef = proxyRefUrl.searchParams.get('url');
+          let originalRef = proxyRefUrl.searchParams.get('url');
           if (originalRef) {
-            proxyReferer = originalRef;
-            proxyOrigin = new URL(originalRef).origin;
+            if (!originalRef.startsWith('http')) {
+              try {
+                originalRef = Buffer.from(originalRef, 'base64').toString('utf-8');
+              } catch(e) {}
+            }
+            if (originalRef && originalRef.startsWith('http')) {
+              proxyReferer = originalRef;
+              proxyOrigin = new URL(originalRef).origin;
+            }
           }
         } catch(e) {}
       }
@@ -111,7 +140,19 @@ async function startServer() {
         response = await fetch(resolvedUrl, fetchOptions);
       } catch (networkError: any) {
         // Many ad blockers or CDNs simply drop the connection
-        return res.status(502).send(`Bad Gateway: Could not reach ${resolvedUrl}`);
+        console.error('Fetch error:', networkError);
+        return res.status(502).send(`
+          <html>
+            <body style="font-family: sans-serif; padding: 2rem; background: #111; color: #fff; text-align: center;">
+              <h2>Bad Gateway: Could not reach target</h2>
+              <p>Target: <b>${resolvedUrl}</b></p>
+              <div style="background: #222; padding: 1rem; border-radius: 8px; color: #ff6b6b; font-family: monospace; display: inline-block;">
+                ${networkError.message || networkError.toString()}
+              </div>
+              <p style="margin-top: 2rem; color: #888;">This could be due to a DNS resolution failure, a blocked domain, or the target site refusing the connection.</p>
+            </body>
+          </html>
+        `);
       }
 
       const contentType = response.headers.get('content-type') || '';
@@ -139,7 +180,8 @@ async function startServer() {
             // Rewrite redirects to stay inside the proxy
             try {
               const redirectUrl = new URL(value, resolvedUrl).href;
-              res.set(key, `/api/proxy?url=${encodeURIComponent(redirectUrl)}`);
+              const encodedRedirectUrl = Buffer.from(redirectUrl, 'utf-8').toString('base64');
+              res.set(key, `/api/proxy?url=${encodeURIComponent(encodedRedirectUrl)}`);
             } catch (e) {
               res.set(key, value);
             }
@@ -156,6 +198,14 @@ async function startServer() {
       const isCss = contentType.includes('text/css');
       const isJs = contentType.includes('javascript') || contentType.includes('x-javascript') || contentType.includes('ecmascript');
 
+      function encodeUrlSafeNode(u: string) {
+        try {
+           return encodeURIComponent(Buffer.from(u, 'utf-8').toString('base64'));
+        } catch(e) {
+           return encodeURIComponent(u);
+        }
+      }
+
       if (isHtml || isCss || isJs) {
         let text = await response.text();
         const base = new URL(resolvedUrl);
@@ -164,64 +214,90 @@ async function startServer() {
         if (isJs || isHtml) {
            // For SPAs (Next.js/React/Bing) we MUST patch their client-side router reading window.location
            // Instead of static strings that break History API (like Bing SERP), we use a dynamic proxy object `__px_loc`
+           // We ONLY replace safe properties, using a robust wrapper structure. 
+           // We use window['location'] inside the replacement so subsequent regexes don't match it again!
+           const safePatch = (prop: string) => `(window.__px_loc ? window.__px_loc.${prop} : window['location'].${prop})`;
            
-           // We'll inject `__px_loc` definition in HTML
-           text = text.replace(/window\.location\.pathname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.pathname : window.location.pathname)`);
-           text = text.replace(/(?<!\w|\.)location\.pathname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.pathname : location.pathname)`);
+           // Match property access but avoid left-hand side assignment (e.g. location.href = "..." which would break if replaced to (ternary) = "...")
+           const noAssign = `(?!\s*=(?!=))`;
            
-           text = text.replace(/window\.location\.hostname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.hostname : window.location.hostname)`);
-           text = text.replace(/(?<!\w|\.)location\.hostname(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.hostname : location.hostname)`);
+           text = text.replace(new RegExp(`window\\.location\\.pathname${noAssign}`, 'g'), safePatch('pathname'));
+           text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.pathname${noAssign}`, 'g'), safePatch('pathname'));
            
-           text = text.replace(/window\.location\.host(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.host : window.location.host)`);
-           text = text.replace(/(?<!\w|\.)location\.host(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.host : location.host)`);
+           text = text.replace(new RegExp(`window\\.location\\.hostname${noAssign}`, 'g'), safePatch('hostname'));
+           text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.hostname${noAssign}`, 'g'), safePatch('hostname'));
+           
+           text = text.replace(new RegExp(`window\\.location\\.host${noAssign}`, 'g'), safePatch('host'));
+           text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.host${noAssign}`, 'g'), safePatch('host'));
 
-           text = text.replace(/window\.location\.origin(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.origin : window.location.origin)`);
-           text = text.replace(/(?<!\w|\.)location\.origin(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.origin : location.origin)`);
+           text = text.replace(new RegExp(`window\\.location\\.origin${noAssign}`, 'g'), safePatch('origin'));
+           text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.origin${noAssign}`, 'g'), safePatch('origin'));
            
-           text = text.replace(/window\.location\.href(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.href : window.location.href)`);
-           text = text.replace(/(?<!\w|\.)location\.href(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.href : location.href)`);
+           text = text.replace(new RegExp(`window\\.location\\.href${noAssign}`, 'g'), safePatch('href'));
+           text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.href${noAssign}`, 'g'), safePatch('href'));
            
-           text = text.replace(/window\.location\.search(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.search : window.location.search)`);
-           text = text.replace(/(?<!\w|\.)location\.search(?!\s*=(?!=))/g, `(window.__px_loc ? window.__px_loc.search : location.search)`);
+           text = text.replace(new RegExp(`window\\.location\\.search${noAssign}`, 'g'), safePatch('search'));
+           text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.search${noAssign}`, 'g'), safePatch('search'));
            
            // Intercept location modifications safely without breaking parentheses
-           text = text.replace(/(?<!\w|\.)location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : location.replace)(');
-           text = text.replace(/window\.location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window.location.replace)(');
-           text = text.replace(/(?<!\w|\.)location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : location.assign)(');
-           text = text.replace(/window\.location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window.location.assign)(');
+           text = text.replace(/(?<!\w|\.)location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window["location"].replace)(');
+           text = text.replace(/window\.location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window["location"].replace)(');
+           text = text.replace(/(?<!\w|\.)location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window["location"].assign)(');
+           text = text.replace(/window\.location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window["location"].assign)(');
            
            // Intercept href assignments (e.g. location.href = "...")
-           // We do a best-effort simple regex to catch the most common pattern
-           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*(['"][^'"]+['"])/g, 'location.href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
-           text = text.replace(/window\.location\.href\s*=\s*(['"][^'"]+['"])/g, 'window.location.href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
+           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*(['"][^'"]+['"])/g, 'window["location"].href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
+           text = text.replace(/window\.location\.href\s*=\s*(['"][^'"]+['"])/g, 'window["location"].href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
         }
 
         if (isHtml || isCss) {
           // Basic link rewriting for HTML/CSS
           // Use a relative path for the base URL to ensure it works behind the AI Studio proxy
           
-          // Regex to find attributes like src="...", href="..."
-          // This targets typical HTML/CSS URL patterns
-          text = text.replace(/(src|href|action)=["']([^"']+)["']/gi, (match, attr, content) => {
-          try {
-            // Skip data URIs and anchor links
-            if (content.startsWith('data:') || content.startsWith('#') || content.startsWith('javascript:')) {
-              return match;
-            }
-            
-            const absoluteUrl = new URL(content, base).href;
-            return `${attr}="${baseUrl}${encodeURIComponent(absoluteUrl)}"`;
-          } catch (e) {
-            return match;
+           if (isHtml) {
+           // Regex to find attributes like src="...", href="..." strictly inside HTML tags
+            text = text.replace(/<(?:!--[\s\S]*?--!?>|[^>]+)>/g, (tagMatch) => {
+               if (tagMatch.startsWith('<!--')) return tagMatch; // Skip comments
+               
+               // Strip CSP meta tags
+               if (tagMatch.match(/http-equiv=["']?Content-Security-Policy["']?/i)) {
+                 return '';
+               }
+               
+               return tagMatch.replace(/(src|href|action)=["']([^"']+)["']/gi, (match, attr, content) => {
+                 try {
+                   // Skip data URIs and anchor links
+                   if (content.startsWith('data:') || content.startsWith('#') || content.startsWith('javascript:')) {
+                     return match;
+                   }
+                   
+                   const absoluteUrl = new URL(content, base).href;
+                   return `${attr}="${baseUrl}${encodeUrlSafeNode(absoluteUrl)}"`;
+                 } catch (e) {
+                   return match;
+                 }
+               });
+            });
           }
-        });
+
+          if (isCss) {
+             text = text.replace(/(src|href)=["']([^"']+)["']/gi, (match, attr, content) => {
+               try {
+                 if (content.startsWith('data:')) return match;
+                 const absoluteUrl = new URL(content, base).href;
+                 return `${attr}="${baseUrl}${encodeUrlSafeNode(absoluteUrl)}"`;
+               } catch (e) {
+                 return match;
+               }
+             });
+          }
 
         // Also handle CSS url(...)
         text = text.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, content) => {
           try {
              if (content.startsWith('data:')) return match;
              const absoluteUrl = new URL(content, base).href;
-             return `url("${baseUrl}${encodeURIComponent(absoluteUrl)}")`;
+             return `url("${baseUrl}${encodeUrlSafeNode(absoluteUrl)}")`;
           } catch (e) {
             return match;
           }
@@ -234,7 +310,7 @@ async function startServer() {
           text = text.replace(/<meta http-equiv=["']refresh["'] content=["'](\d+);\s*url=([^"']+)["']/gi, (match, delay, url) => {
             try {
                const absoluteUrl = new URL(url, base).href;
-               return `<meta http-equiv="refresh" content="${delay};url=${baseUrl}${encodeURIComponent(absoluteUrl)}">`;
+               return `<meta http-equiv="refresh" content="${delay};url=${baseUrl}${encodeUrlSafeNode(absoluteUrl)}">`;
             } catch(e) {
                return match;
             }
@@ -250,6 +326,18 @@ async function startServer() {
                const targetBase = "${resolvedUrl}";
                const targetUrlObj = new URL(targetBase);
                
+               function encodeUrlSafe(u) {
+                  // Double encode to hide from deep packet inspection effectively, or simply base64
+                  try {
+                     const b64 = btoa(encodeURIComponent(u).replace(/%([0-9A-F]{2})/g, function(match, p1) {
+                         return String.fromCharCode(parseInt(p1, 16));
+                     }));
+                     return encodeURIComponent(b64);
+                  } catch(e) {
+                     return encodeURIComponent(u); // Fallback
+                  }
+               }
+
                function wrapUrl(url, originalNodeAttr = null) {
                  if (!url || typeof url !== 'string') return url;
                  if (url.includes(proxyBase)) return url;
@@ -261,7 +349,7 @@ async function startServer() {
                    let urlToResolve = originalNodeAttr || url;
                    // If it's an absolute URL that doesn't belong to our proxy origin and isn't relative
                    if (urlToResolve.startsWith('http') && !urlToResolve.startsWith(window.location.origin)) {
-                     return proxyBase + encodeURIComponent(urlToResolve);
+                     return proxyBase + encodeUrlSafe(urlToResolve);
                    }
                    
                    // Resolve relative Paths against the Target domain, not proxy
@@ -271,7 +359,7 @@ async function startServer() {
                    }
                    
                    const absoluteUrl = new URL(pathToResolve, targetBase).href;
-                   return proxyBase + encodeURIComponent(absoluteUrl);
+                   return proxyBase + encodeUrlSafe(absoluteUrl);
                  } catch(e) {
                    return url;
                  }
@@ -289,7 +377,14 @@ async function startServer() {
                     try {
                        const currentUrl = new URL(window.location.href);
                        const realUrlParam = currentUrl.searchParams.get('url');
-                       if (realUrlParam) return realUrlParam;
+                       if (realUrlParam) {
+                          if (!realUrlParam.startsWith('http')) {
+                             try {
+                                return decodeURIComponent(escape(atob(realUrlParam)));
+                             } catch(e) {}
+                          }
+                          return realUrlParam;
+                       }
                     } catch(e) {}
                     return targetBase;
                  },
@@ -345,7 +440,8 @@ async function startServer() {
                // Patch window.open
                const originalOpenWindow = window.open;
                window.open = function(url, name, features) {
-                 return originalOpenWindow.call(window, wrapUrl(url), name, features);
+                 // Force _self or explicitly define the proxy URL. Opening in a new tab might escape the app context
+                 return originalOpenWindow.call(window, wrapUrl(url), '_self', features);
                };
 
                // MutationObserver to handle dynamic elements
@@ -355,10 +451,14 @@ async function startServer() {
                      if (node.nodeType === 1) {
                        if (node.tagName === 'A' && node.hasAttribute('href')) {
                          node.href = wrapUrl(node.href, node.getAttribute('href'));
+                         if (node.getAttribute('target') === '_blank') node.setAttribute('target', '_self');
                        }
                        if (node.tagName === 'FORM') patchForm(node);
                        node.querySelectorAll?.('a').forEach(a => {
-                         if(a.hasAttribute('href')) a.href = wrapUrl(a.href, a.getAttribute('href'));
+                         if(a.hasAttribute('href')) {
+                           a.href = wrapUrl(a.href, a.getAttribute('href'));
+                           if (a.getAttribute('target') === '_blank') a.setAttribute('target', '_self');
+                         }
                        });
                        node.querySelectorAll?.('form').forEach(f => patchForm(f));
                      }
@@ -420,6 +520,9 @@ async function startServer() {
                    if (!rawHref.includes(proxyBase) && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
                      target.href = wrapUrl(target.href, rawHref);
                    }
+                   if (target.getAttribute('target') === '_blank') {
+                     target.setAttribute('target', '_self');
+                   }
                  }
                }, true);
 
@@ -438,6 +541,45 @@ async function startServer() {
            `;
            // Inject at the beginning of head
            text = text.replace(/<head>/i, '<head>' + injection);
+           
+           // OBFUSCATION FOR CONTENT FILTERING BYPASS (Anti-ISGC)
+           // If the payload is HTML, we pack it so that deep packet inspection L7 filters
+           // cannot read the plaintext HTML (which might contain blocked keywords like "bing").
+           const encodedHtml = Buffer.from(text, 'utf-8').toString('base64');
+           // Reverse the base64 string to break standard base64 chunk scanners on firewalls
+           const reversedB64 = encodedHtml.split('').reverse().join('');
+           
+           const packedHtml = `<!DOCTYPE html>
+           <html lang="en">
+           <head>
+             <meta charset="UTF-8">
+             <title>Secure Gateway</title>
+             <script>
+               (function(){
+                 try {
+                   var rev = "${reversedB64}";
+                   var b64 = rev.split('').reverse().join('');
+                   var bin = atob(b64);
+                   var bytes = new Uint8Array(bin.length);
+                   for (var i = 0; i < bin.length; i++) {
+                       bytes[i] = bin.charCodeAt(i);
+                   }
+                   var dec = new TextDecoder('utf-8').decode(bytes);
+                   document.open();
+                   document.write(dec);
+                   document.close();
+                 } catch(e) {
+                   document.body.innerHTML = "Gateway Decode Error: " + e.message;
+                 }
+               })();
+             </script>
+           </head>
+           <body style="background:#111; color:#fff;">
+             <!-- Anti-DPI Obfuscation Frame -->
+           </body>
+           </html>`;
+           
+           return res.send(packedHtml);
         }
 
         res.send(text);
