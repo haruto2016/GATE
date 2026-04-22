@@ -386,6 +386,12 @@ async function startServer() {
                  const e = console.error;
                  console.error = (...a) => { e.apply(console,a); window.parent.postMessage({type:'PROXY_LOG',level:'error',args:a.map(String)},'*'); };
                  window.onerror = (m,u,l,c,e) => { window.parent.postMessage({type:'PROXY_LOG',level:'error',args:[String(m)]},'*'); };
+                 try {
+                   if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(r => r.forEach(s => s.unregister()));
+                   Object.defineProperty(navigator, 'serviceWorker', { get: () => undefined, configurable: true });
+                   const _W = window.Worker;
+                   window.Worker = function(s, o) { try { return new _W(wrapUrl(s), o); } catch(ex) { return new _W(s, o); } };
+                 } catch(ex) {}
                } catch(e) {}
                const proxyBase = "${baseUrl}";
                const targetBase = "${resolvedUrl}";
