@@ -620,6 +620,7 @@ async function startServer() {
            `;
            // Inject at the beginning of head
            text = text.replace(/<head>/i, '<head>' + injection);
+           return res.send(text);
            
            // OBFUSCATION FOR CONTENT FILTERING BYPASS (Anti-ISGC)
            // If the payload is HTML, we pack it so that deep packet inspection L7 filters
