@@ -132,7 +132,7 @@ async function startServer() {
       proxyHeaders['Accept-Encoding'] = 'gzip, deflate'; 
       
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
 
       const fetchOptions: RequestInit = {
         method: req.method,
@@ -190,16 +190,18 @@ async function startServer() {
       // Copy essential headers but strip security ones that prevent framing
       res.set('Content-Type', contentType);
       
-      // Strip headers that prevent framing, modern security features, or cause encoding issues
+      const isHtml = contentType.includes('text/html');
+      const isCss = contentType.includes('text/css');
+      const isJs = contentType.includes('javascript') || contentType.includes('x-javascript') || contentType.includes('ecmascript');
+      const shouldModifyBody = isHtml || isCss || isJs;
+
+      // Strip headers that prevent framing, or cause encoding issues
       const headersToStrip = [
         'x-frame-options', 
         'content-security-policy', 
         'x-content-security-policy', 
         'content-security-policy-report-only',
         'x-webkit-csp',
-        'content-encoding', 
-        'content-length',   
-        'transfer-encoding',
         'access-control-allow-origin',
         'cross-origin-opener-policy',
         'cross-origin-embedder-policy',
@@ -207,14 +209,19 @@ async function startServer() {
         'permissions-policy',
         'expect-ct',
         'report-to',
-        'strict-transport-security' // Let proxy handle HTTPS
+        'strict-transport-security'
       ];
+      
+      // If we are modifying the body (text) or if the body was compressed (fetch decompresses it),
+      // the original content-length is no longer valid.
+      if (shouldModifyBody || response.headers.get('content-encoding')) {
+        headersToStrip.push('content-length', 'content-encoding', 'transfer-encoding');
+      }
       
       response.headers.forEach((value, key) => {
         const lowerKey = key.toLowerCase();
         if (!headersToStrip.includes(lowerKey) && lowerKey !== 'set-cookie') {
           if (lowerKey === 'location') {
-            // Rewrite redirects to stay inside the proxy
             try {
               const redirectUrl = new URL(value, resolvedUrl).href;
               const encodedRedirectUrl = Buffer.from(redirectUrl, 'utf-8').toString('base64');
@@ -234,7 +241,6 @@ async function startServer() {
         // @ts-ignore
         const cookies = response.headers.getSetCookie();
         if (cookies && cookies.length > 0) {
-          // IMPORTANT: Strip Domain and Path so the cookies are correctly set for our proxy domain
           const processedCookies = cookies.map((c: string) => {
             return c.replace(/Domain=[^;]+;?/gi, '').replace(/Path=[^;]+;?/gi, 'Path=/').replace(/Secure/gi, '');
           });
@@ -252,10 +258,6 @@ async function startServer() {
       res.removeHeader('X-Frame-Options');
       res.removeHeader('Content-Security-Policy');
 
-      const isHtml = contentType.includes('text/html');
-      const isCss = contentType.includes('text/css');
-      const isJs = contentType.includes('javascript') || contentType.includes('x-javascript') || contentType.includes('ecmascript');
-
       function encodeUrlSafeNode(u: string) {
         try {
            return encodeURIComponent(Buffer.from(u, 'utf-8').toString('base64'));
@@ -264,7 +266,7 @@ async function startServer() {
         }
       }
 
-      if (isHtml || isCss || isJs) {
+      if (shouldModifyBody) {
         let text = await response.text();
         const base = new URL(resolvedUrl);
         const baseUrl = '/api/proxy?url=';
