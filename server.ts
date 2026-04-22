@@ -131,10 +131,14 @@ async function startServer() {
       // We process responses in node, so ask for uncompressed (or let undici handle gzip via auto)
       proxyHeaders['Accept-Encoding'] = 'gzip, deflate'; 
       
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
+
       const fetchOptions: RequestInit = {
         method: req.method,
         headers: proxyHeaders,
-        redirect: 'manual' // Handle redirects manually if needed, or follow. Undici follows up to 20 by default unless manual
+        redirect: 'manual',
+        signal: controller.signal as any
       };
       
       if (req.method !== 'GET' && req.method !== 'HEAD' && Buffer.isBuffer(req.body) && req.body.length > 0) {
@@ -143,22 +147,35 @@ async function startServer() {
 
       let response;
       try {
+        console.log(`[Proxy] Fetching: ${resolvedUrl} (${req.method})`);
         response = await fetch(resolvedUrl, fetchOptions);
       } catch (networkError: any) {
-        // Many ad blockers or CDNs simply drop the connection
-        console.error('Fetch error:', networkError);
+        console.error(`[Proxy] Connect Failure: ${resolvedUrl}`, networkError);
+        const isTimeout = networkError.name === 'AbortError';
         return res.status(502).send(`
           <html>
-            <body style="font-family: sans-serif; padding: 2rem; background: #111; color: #fff; text-align: center;">
-              <h2>Bad Gateway: Could not reach target</h2>
-              <p>Target: <b>${resolvedUrl}</b></p>
-              <div style="background: #222; padding: 1rem; border-radius: 8px; color: #ff6b6b; font-family: monospace; display: inline-block;">
-                ${networkError.message || networkError.toString()}
+            <body style="font-family: sans-serif; padding: 2rem; background: #050a16; color: #fff; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+              <h2 style="color: #60a5fa; margin-bottom: 0.5rem;">${isTimeout ? 'GATEWAY_TIMEOUT' : 'CONNECTION_FAILED'}</h2>
+              <p style="color: rgba(255,255,255,0.5); font-size: 14px; margin-bottom: 2rem;">Target: <code style="background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px;">${resolvedUrl}</code></p>
+              
+              <div style="background: rgba(239, 68, 68, 0.1); padding: 1.5rem; border-radius: 16px; color: #f87171; font-family: monospace; display: inline-block; border: 1px solid rgba(239, 68, 68, 0.2); max-width: 80%; word-break: break-all;">
+                ${isTimeout ? 'The request to the target server took longer than 20 seconds and was aborted.' : (networkError.message || networkError.toString())}
               </div>
-              <p style="margin-top: 2rem; color: #888;">This could be due to a DNS resolution failure, a blocked domain, or the target site refusing the connection.</p>
+              
+              <p style="margin-top: 2rem; color: rgba(255,255,255,0.4); font-size: 13px; max-width: 500px;">
+                This error occurs when the proxy server cannot establish a stable connection with the requested site. 
+                Common reasons include DNS resolution failures, regional blocking, or server-side restrictions.
+              </p>
+              
+              <div style="margin-top: 2.5rem; display: flex; gap: 1rem;">
+                <button onclick="location.reload()" style="background: #60a5fa; color: #050a16; border: none; padding: 12px 24px; border-radius: 12px; font-weight: bold; cursor: pointer; transition: transform 0.2s;">RETRY_TUNNEL</button>
+                <button onclick="window.history.back()" style="background: rgba(255,255,255,0.1); color: #fff; border: none; padding: 12px 24px; border-radius: 12px; font-weight: bold; cursor: pointer;">GO_BACK</button>
+              </div>
             </body>
           </html>
         `);
+      } finally {
+        clearTimeout(timeoutId);
       }
 
       const contentType = response.headers.get('content-type') || '';
@@ -329,6 +346,13 @@ async function startServer() {
            const injection = `
            <script>
              (function() {
+               try {
+                 const o = console.log;
+                 console.log = (...a) => { o.apply(console,a); window.parent.postMessage({type:'PROXY_LOG',level:'info',args:a.map(String)},'*'); };
+                 const e = console.error;
+                 console.error = (...a) => { e.apply(console,a); window.parent.postMessage({type:'PROXY_LOG',level:'error',args:a.map(String)},'*'); };
+                 window.onerror = (m,u,l,c,e) => { window.parent.postMessage({type:'PROXY_LOG',level:'error',args:[String(m)]},'*'); };
+               } catch(e) {}
                const proxyBase = "${baseUrl}";
                const targetBase = "${resolvedUrl}";
                const targetUrlObj = new URL(targetBase);
@@ -573,8 +597,8 @@ async function startServer() {
                    }
                    var dec = new TextDecoder('utf-8').decode(bytes);
                    document.open();
-                   document.write(dec);
-                   document.close();
+                   setTimeout(() => { document.write(dec); document.close(); }, 50);
+                   // End of decryption
                  } catch(e) {
                    document.body.innerHTML = "Gateway Decode Error: " + e.message;
                  }

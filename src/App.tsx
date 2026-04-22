@@ -27,7 +27,24 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'desktop' | 'mobile'>('desktop');
   const [proxyError, setProxyError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<{level: string, message: string, time: string}[]>([]);
+  const [showConsole, setShowConsole] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'PROXY_LOG') {
+        const { level, args } = event.data;
+        setLogs(prev => [{
+          level,
+          message: args.join(' '),
+          time: new Date().toLocaleTimeString()
+        }, ...prev].slice(0, 50));
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
 
   useEffect(() => {
     // Check if the internal proxy is available. Use a base64 encoded URL to prevent DPI blocking
@@ -104,6 +121,8 @@ export default function App() {
       setHistory(prev => [resolved, ...prev.slice(0, 9)]);
     }
   };
+
+  const stopLoading = () => setIsLoading(false);
 
   const handleRefresh = () => {
     if (iframeRef.current) {
@@ -184,7 +203,11 @@ export default function App() {
               <Monitor className="w-4 h-4" />
             </button>
           </div>
-          <button className="p-2 hover:bg-white/10 rounded-full text-white/60">
+          <button 
+            onClick={() => setShowConsole(prev => !prev)}
+            className={`p-2 rounded-full transition-all ${showConsole ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'hover:bg-white/10 text-white/60'}`}
+            title="Proxy Console"
+          >
             <Info className="w-4 h-4" />
           </button>
         </div>
@@ -297,6 +320,12 @@ export default function App() {
                           <span className="text-sm font-bold tracking-[0.3em] text-white uppercase mb-1">Tunneling</span>
                           <span className="text-[10px] text-white/40 animate-pulse">Establishing secure handshake...</span>
                         </div>
+                        <button 
+                          onClick={stopLoading}
+                          className="mt-4 px-4 py-1.5 rounded-full border border-white/10 text-[10px] uppercase tracking-widest text-white/40 hover:text-white hover:bg-white/10 transition-all"
+                        >
+                          Cancel
+                        </button>
                       </div>
                     </motion.div>
                   )}
@@ -361,6 +390,40 @@ export default function App() {
           )}
         </section>
       </main>
+
+      {/* Debug Console Overlay */}
+      <AnimatePresence>
+        {showConsole && (
+          <motion.div 
+            initial={{ opacity: 0, y: 100 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 100 }}
+            className="fixed bottom-4 left-4 right-4 h-64 glass-card rounded-2xl border border-red-500/30 overflow-hidden z-[100] shadow-2xl flex flex-col"
+          >
+            <div className="bg-red-500/10 px-4 py-2 flex items-center justify-between border-b border-red-500/20">
+              <span className="text-[10px] uppercase font-bold tracking-widest text-red-400">Security Proxy Console</span>
+              <button 
+                onClick={() => setLogs([])}
+                className="text-[10px] text-red-400 hover:text-white uppercase font-bold"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 font-mono text-[11px] space-y-1">
+              {logs.length === 0 && <div className="text-white/20 italic">No logs detected from the proxy gateway...</div>}
+              {logs.map((log, i) => (
+                <div key={i} className="flex gap-3 leading-relaxed group">
+                  <span className="text-white/20 whitespace-nowrap">{log.time}</span>
+                  <span className={`${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : 'text-blue-400'} font-bold uppercase w-12`}>
+                    [{log.level}]
+                  </span>
+                  <span className="text-white/70 group-hover:text-white transition-colors">{log.message}</span>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Footer Info Bar */}
       <footer className="h-8 bg-black/20 border-t border-white/5 px-6 flex items-center justify-between text-[10px] text-white/30 tracking-wider">
