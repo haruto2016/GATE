@@ -595,7 +595,7 @@ async function startServer() {
                const originalWrite = document.write;
                document.write = function(content) {
                  if (typeof content !== 'string') return originalWrite.call(document, content);
-                 const proxied = content.replace(/(src|href)=["']([^"']+)["']/gi, (m, a, v) => `${a}="${wrapUrl(v)}"`);
+                 const proxied = content.replace(/(src|href)=["']([^"']+)["']/gi, function(m, a, v) { return a + '="' + wrapUrl(v) + '"'; });
                  return originalWrite.call(document, proxied);
                };
 
