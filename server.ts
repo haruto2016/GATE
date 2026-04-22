@@ -49,7 +49,9 @@ async function startServer() {
 
   // Proxy endpoint handles all HTTP methods (GET, POST, etc.) for AJAX compatibility
   app.all('/api/proxy', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
-    let targetUrl = req.query.url as string;
+    let rawUrl = req.query.url;
+    if (Array.isArray(rawUrl)) rawUrl = rawUrl[0]; 
+    let targetUrl = rawUrl as string;
 
     if (!targetUrl) {
       return res.status(400).send('URL is required');
@@ -58,15 +60,13 @@ async function startServer() {
     // Attempt to decode targetUrl as base64 if it does not look like HTTP.
     if (targetUrl && !targetUrl.startsWith('http') && targetUrl.length > 5) {
       try {
-        // Express converts '+' to ' ' in query params. We need '+' for base64.
         const normalized = targetUrl.trim().replace(/ /g, '+');
-        const decoded = Buffer.from(normalized, 'base64').toString('utf-8');
-        if (decoded.startsWith('http')) {
+        const b64 = normalized.replace(/-/g, '+').replace(/_/g, '/');
+        const decoded = Buffer.from(b64, 'base64').toString('utf-8');
+        if (decoded.match(/^https?:\/\//i) || decoded.startsWith('//')) {
           targetUrl = decoded;
         }
-      } catch (e) {
-        // Not valid base64
-      }
+      } catch (e) {}
     }
 
     // Append other query parameters back to targetUrl
@@ -152,6 +152,15 @@ async function startServer() {
       } catch (networkError: any) {
         console.error(`[Proxy] Connect Failure: ${resolvedUrl}`, networkError);
         const isTimeout = networkError.name === 'AbortError';
+        
+        // If it's a script or CSS, return a comment instead of HTML to avoid console noise
+        const isScript = resolvedUrl.match(/\.(js|mjs|ts|jsx|tsx)($|\?)/i);
+        const isCss = resolvedUrl.match(/\.css($|\?)/i);
+        
+        if (isScript || isCss) {
+          return res.status(502).type(isScript ? 'text/javascript' : 'text/css').send(`/* PROXY_AUTOBOT_ERROR: ${isTimeout ? 'TIMEOUT' : 'CONNECTION_FAILED'} for ${resolvedUrl} */`);
+        }
+
         return res.status(502).send(`
           <html>
             <body style="font-family: sans-serif; padding: 2rem; background: #050a16; color: #fff; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0;">
@@ -161,11 +170,6 @@ async function startServer() {
               <div style="background: rgba(239, 68, 68, 0.1); padding: 1.5rem; border-radius: 16px; color: #f87171; font-family: monospace; display: inline-block; border: 1px solid rgba(239, 68, 68, 0.2); max-width: 80%; word-break: break-all;">
                 ${isTimeout ? 'The request to the target server took longer than 20 seconds and was aborted.' : (networkError.message || networkError.toString())}
               </div>
-              
-              <p style="margin-top: 2rem; color: rgba(255,255,255,0.4); font-size: 13px; max-width: 500px;">
-                This error occurs when the proxy server cannot establish a stable connection with the requested site. 
-                Common reasons include DNS resolution failures, regional blocking, or server-side restrictions.
-              </p>
               
               <div style="margin-top: 2.5rem; display: flex; gap: 1rem;">
                 <button onclick="location.reload()" style="background: #60a5fa; color: #050a16; border: none; padding: 12px 24px; border-radius: 12px; font-weight: bold; cursor: pointer; transition: transform 0.2s;">RETRY_TUNNEL</button>
@@ -192,14 +196,23 @@ async function startServer() {
         'content-security-policy', 
         'x-content-security-policy', 
         'content-security-policy-report-only',
-        'content-encoding', // Let Express handle compression/encoding
-        'content-length',   // Length changes after rewriting
+        'x-webkit-csp',
+        'content-encoding', 
+        'content-length',   
         'transfer-encoding',
-        'access-control-allow-origin' // Prevent target CORS from interfering with our framing
+        'access-control-allow-origin',
+        'cross-origin-opener-policy',
+        'cross-origin-embedder-policy',
+        'cross-origin-resource-policy',
+        'permissions-policy',
+        'expect-ct',
+        'report-to',
+        'strict-transport-security' // Let proxy handle HTTPS
       ];
+      
       response.headers.forEach((value, key) => {
         const lowerKey = key.toLowerCase();
-        if (!headersToStrip.includes(lowerKey)) {
+        if (!headersToStrip.includes(lowerKey) && lowerKey !== 'set-cookie') {
           if (lowerKey === 'location') {
             // Rewrite redirects to stay inside the proxy
             try {
@@ -214,7 +227,28 @@ async function startServer() {
           }
         }
       });
-      // Explicitly unset frame options just in case
+      
+      // Correct Multi-value Set-Cookie handling
+      // @ts-ignore
+      if (response.headers.getSetCookie) {
+        // @ts-ignore
+        const cookies = response.headers.getSetCookie();
+        if (cookies && cookies.length > 0) {
+          // IMPORTANT: Strip Domain and Path so the cookies are correctly set for our proxy domain
+          const processedCookies = cookies.map((c: string) => {
+            return c.replace(/Domain=[^;]+;?/gi, '').replace(/Path=[^;]+;?/gi, 'Path=/').replace(/Secure/gi, '');
+          });
+          res.set('Set-Cookie', processedCookies);
+        }
+      } else {
+        const rawCookies = response.headers.get('set-cookie');
+        if (rawCookies) {
+          const processed = rawCookies.split(', ').map(c => c.replace(/Domain=[^;]+;?/, '').replace(/Path=[^;]+;?/, 'Path=/').replace(/Secure/, ''));
+          res.set('Set-Cookie', processed);
+        }
+      }
+
+      // Explicitly unset problematic headers
       res.removeHeader('X-Frame-Options');
       res.removeHeader('Content-Security-Policy');
 
@@ -557,6 +591,14 @@ async function startServer() {
                  }
                }, true);
 
+               // Patch document.write
+               const originalWrite = document.write;
+               document.write = function(content) {
+                 if (typeof content !== 'string') return originalWrite.call(document, content);
+                 const proxied = content.replace(/(src|href)=["']([^"']+)["']/gi, (m, a, v) => `${a}="${wrapUrl(v)}"`);
+                 return originalWrite.call(document, proxied);
+               };
+
                // Patch History
                const originalPushState = history.pushState;
                history.pushState = function(state, title, url) {
@@ -591,13 +633,10 @@ async function startServer() {
                    var rev = "${reversedB64}";
                    var b64 = rev.split('').reverse().join('');
                    var bin = atob(b64);
-                   var bytes = new Uint8Array(bin.length);
-                   for (var i = 0; i < bin.length; i++) {
-                       bytes[i] = bin.charCodeAt(i);
-                   }
-                   var dec = new TextDecoder('utf-8').decode(bytes);
+                   var dec = new TextDecoder('utf-8').decode(Uint8Array.from(atob(b64), function(c){return c.charCodeAt(0);}));
                    document.open();
-                   setTimeout(() => { document.write(dec); document.close(); }, 50);
+                   document.write(dec);
+                   document.close();
                    // End of decryption
                  } catch(e) {
                    document.body.innerHTML = "Gateway Decode Error: " + e.message;
