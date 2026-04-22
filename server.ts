@@ -276,7 +276,7 @@ async function startServer() {
            // Instead of static strings that break History API (like Bing SERP), we use a dynamic proxy object `__px_loc`
            // We ONLY replace safe properties, using a robust wrapper structure. 
            // We use window['location'] inside the replacement so subsequent regexes don't match it again!
-           const safePatch = (prop: string) => `(window.__px_loc ? window.__px_loc.${prop} : window['location'].${prop})`;
+           const safePatch = (prop: string) => `(window.__px_loc ? window.__px_loc.${prop} : window.location.${prop})`;
            
            // Match property access but avoid left-hand side assignment (e.g. location.href = "..." which would break if replaced to (ternary) = "...")
            const noAssign = `(?!\s*=(?!=))`;
@@ -300,14 +300,14 @@ async function startServer() {
            text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.search${noAssign}`, 'g'), safePatch('search'));
            
            // Intercept location modifications safely without breaking parentheses
-           text = text.replace(/(?<!\w|\.)location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window["location"].replace)(');
-           text = text.replace(/window\.location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window["location"].replace)(');
-           text = text.replace(/(?<!\w|\.)location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window["location"].assign)(');
-           text = text.replace(/window\.location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window["location"].assign)(');
+           text = text.replace(/(?<!\w|\.)location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window.location.replace)(');
+           text = text.replace(/window\.location\.replace\(/g, '(window.__px_loc ? window.__px_loc.doReplace : window.location.replace)(');
+           text = text.replace(/(?<!\w|\.)location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window.location.assign)(');
+           text = text.replace(/window\.location\.assign\(/g, '(window.__px_loc ? window.__px_loc.doAssign : window.location.assign)(');
            
            // Intercept href assignments (e.g. location.href = "...")
-           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*(['"][^'"]+['"])/g, 'window["location"].href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
-           text = text.replace(/window\.location\.href\s*=\s*(['"][^'"]+['"])/g, 'window["location"].href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
+           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*(['"][^'"]+['"])/g, 'window.location.href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
+           text = text.replace(/window\.location\.href\s*=\s*(['"][^'"]+['"])/g, 'window.location.href = (window.__px_loc ? window.__px_loc.wrapUrl($1) : $1)');
         }
 
         if (isHtml || isCss) {
@@ -382,6 +382,12 @@ async function startServer() {
            const injection = `
            <script>
              (function() {
+               // Bing Compatibility Mocks
+               window._w = window._w || {};
+               window.sj_be = window.sj_be || function(){};
+               window.sj_evt = window.sj_evt || { bind: function(){}, fire: function(){} };
+               window.parseQueryParams = window.parseQueryParams || function(){ return {}; };
+
                try {
                  const o = console.log;
                  console.log = (...a) => { o.apply(console,a); window.parent.postMessage({type:'PROXY_LOG',level:'info',args:a.map(String)},'*'); };
@@ -390,7 +396,7 @@ async function startServer() {
                  window.onerror = (m,u,l,c,e) => { window.parent.postMessage({type:'PROXY_LOG',level:'error',args:[String(m)]},'*'); };
                  try {
                    if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(r => r.forEach(s => s.unregister()));
-                   Object.defineProperty(navigator, 'serviceWorker', { get: () => undefined, configurable: true });
+                                       Object.defineProperty(navigator, 'serviceWorker', { get: () => ({ controller: null, register: () => Promise.reject(), getRegistrations: () => Promise.resolve([]), addEventListener: () => {} }), configurable: true });
                    const _W = window.Worker;
                    window.Worker = function(s, o) { try { return new _W(wrapUrl(s), o); } catch(ex) { return new _W(s, o); } };
                  } catch(ex) {}
@@ -584,6 +590,29 @@ async function startServer() {
                     patchForm(form);
                  }
                }, true);
+
+               // YouTube Fix: Add alternative player helper
+               if (window.location.href.includes('youtube.com/watch')) {
+                 const checkYt = setInterval(() => {
+                   const owner = document.querySelector('#owner') || document.querySelector('#title');
+                   if (owner && !document.querySelector('#px-yt-fix')) {
+                     const btn = document.createElement('button');
+                     btn.id = 'px-yt-fix';
+                     btn.textContent = 'Play in Proxy-Friendly Player';
+                     btn.style = 'background:#f00; color:#fff; border:none; padding:8px 12px; cursor:pointer; margin:10px; border-radius:4px; font-weight:bold;';
+                     btn.onclick = () => {
+                       const vid = new URLSearchParams(window.location.search).get('v');
+                       if (vid) {
+                         const proxyPlayer = window.location.origin + '/api/proxy?url=' + btoa('https://www.youtube.com/embed/' + vid + '?autoplay=1');
+                         window.location.href = proxyPlayer;
+                       }
+                     };
+                     owner.appendChild(btn);
+                     clearInterval(checkYt);
+                   }
+                 }, 2000);
+                 setTimeout(() => clearInterval(checkYt), 10000);
+               }
 
                // Intercept all link clicks
                window.addEventListener('click', function(e) {
