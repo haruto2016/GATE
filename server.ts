@@ -18,19 +18,21 @@ async function startServer() {
     
     // If it's a proxy request missing the 'url', OR a leaked direct asset request
     if ((isProxyEndpoint && !hasUrlParam) || (!isProxyEndpoint && !isStaticAsset)) {
-      if (req.headers.referer && req.headers.referer.includes('/api/proxy?url=')) {
+      const referer = req.headers.referer;
+      if (referer && referer.includes('/api/proxy?url=')) {
         try {
-          const refererUrl = new URL(req.headers.referer);
+          const refererUrl = new URL(referer);
           let targetEncoded = refererUrl.searchParams.get('url');
           if (targetEncoded) {
             if (!targetEncoded.startsWith('http')) {
-               targetEncoded = Buffer.from(targetEncoded.replace(/ /g, '+'), 'base64').toString('utf-8');
+               const b64 = targetEncoded.replace(/ /g, '+');
+               try { targetEncoded = Buffer.from(b64, 'base64').toString('utf-8'); } catch(e) {}
             }
             if (targetEncoded.startsWith('http')) {
               const baseTarget = new URL(targetEncoded);
               const recoveredUrl = new URL(req.url, baseTarget).href;
               const b64 = Buffer.from(recoveredUrl, 'utf-8').toString('base64');
-              console.log(`[Interceptor] Recovered URL from referer: ${recoveredUrl}`);
+              console.log(`[Interceptor] Recovered: ${recoveredUrl}`);
               return res.redirect(`/api/proxy?url=${encodeURIComponent(b64)}`);
             }
           }
@@ -104,8 +106,13 @@ async function startServer() {
       const isJs = contentType.includes('javascript') || contentType.includes('x-javascript') || contentType.includes('ecmascript');
       const shouldModify = isHtml || isCss || isJs;
 
-      // Clean headers for framing
-      const strip = ['x-frame-options', 'content-security-policy', 'x-content-security-policy', 'strict-transport-security', 'content-length', 'content-encoding'];
+      // Clean headers for framing and privacy
+      const strip = [
+        'x-frame-options', 'content-security-policy', 'x-content-security-policy', 
+        'strict-transport-security', 'content-length', 'content-encoding',
+        'cross-origin-opener-policy', 'cross-origin-embedder-policy', 'cross-origin-resource-policy',
+        'permissions-policy', 'link', 'origin-trial', 'report-to'
+      ];
       response.headers.forEach((v, k) => {
         const l = k.toLowerCase();
         if (!strip.includes(l) && l !== 'set-cookie') {
@@ -130,16 +137,26 @@ async function startServer() {
         const wrap = (u: string) => encodeURIComponent(Buffer.from(u, 'utf-8').toString('base64'));
 
         if (isJs || isHtml) {
-           // Improved Safe Patching (less likely to break code)
+           // Patch property getters
            const props = ['pathname', 'hostname', 'host', 'origin', 'href', 'search', 'hash'];
            props.forEach(p => {
               text = text.replace(new RegExp(`window\\.location\\.${p}(?!\\s*=)`, 'g'), `(window.__px_loc?.${p} || window.location.${p})`);
               text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${p}(?!\\s*=)`, 'g'), `(window.__px_loc?.${p} || window.location.${p})`);
            });
+           // Patch property setters
+           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val})`);
+           text = text.replace(/window\.location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val})`);
+           
            // Patch methods
            ['replace', 'assign'].forEach(m => {
-              text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${m.charAt(0).toUpperCase()+m.slice(1)} || window.location.${m})(`);
+              const uMethod = m.charAt(0).toUpperCase() + m.slice(1);
+              text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${uMethod} || window.location.${m}).call(window.location, `);
+              text = text.replace(new RegExp(`window\\.location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${uMethod} || window.location.${m}).call(window.location, `);
            });
+           
+           // Special: window.location = ... and location = ...
+           text = text.replace(/window\.location\s*=\s*([^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (window.location = ${val})`);
+           text = text.replace(/(?<!\w|\.)location\s*=\s*((?!(window|this|null|undefined|true|false|0|1|2|3|4|5|6|7|8|9|'|"))[^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (location = ${val})`);
         }
 
         if (isHtml) {
@@ -162,11 +179,15 @@ async function startServer() {
               const targetBase = "${resolvedUrl}";
               const proxyOrigin = window.location.origin;
               
+              const b64e = (str) => btoa(unescape(encodeURIComponent(str)));
+              const b64d = (str) => decodeURIComponent(escape(atob(str)));
+
               const wrapUrl = (u) => {
-                if (!u || typeof u !== 'string' || u.includes('/api/proxy') || u.startsWith('data:') || u.startsWith('blob:')) return u;
+                if (!u || typeof u !== 'string' || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('javascript:')) return u;
+                if (u.includes('/api/proxy')) return u;
                 try {
                   const abs = new URL(u, window.__px_loc ? window.__px_loc.href : targetBase).href;
-                  return proxyOrigin + "/api/proxy?url=" + btoa(abs);
+                  return proxyOrigin + "/api/proxy?url=" + b64e(abs);
                 } catch(e) { return u; }
               };
 
@@ -174,7 +195,7 @@ async function startServer() {
                 get _u() {
                    try {
                      const p = new URL(window.location.href).searchParams.get("url");
-                     return new URL(p ? (p.startsWith("http") ? p : atob(p)) : targetBase);
+                     return new URL(p ? (p.startsWith("http") ? p : b64d(p)) : targetBase);
                    } catch(e) { return new URL(targetBase); }
                 },
                 get pathname() { return this._u.pathname; },
@@ -191,6 +212,9 @@ async function startServer() {
 
               // Fix browser APIs
               try {
+                if ('serviceWorker' in navigator) {
+                   navigator.serviceWorker.register = () => new Promise(() => {});
+                }
                 Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
                 Object.defineProperty(window, 'top', { get: () => window, configurable: true });
                 Object.defineProperty(window, 'parent', { get: () => window, configurable: true });
@@ -204,44 +228,42 @@ async function startServer() {
               const _o = XMLHttpRequest.prototype.open;
               XMLHttpRequest.prototype.open = function(m, u, ...a) { return _o.call(this, m, wrapUrl(u), ...a); };
 
-              // Form Patching (Crucial for Search Engines)
+              const _op = window.open;
+              window.open = (u, ...a) => _op.call(window, wrapUrl(u), ...a);
+
+              const _h = window.history;
+              const _ps = _h.pushState;
+              const _rs = _h.replaceState;
+              _h.pushState = function(s, t, u) { return _ps.call(this, s, t, wrapUrl(u)); };
+              _h.replaceState = function(s, t, u) { return _rs.call(this, s, t, wrapUrl(u)); };
+
+              // Form Patching
               const patchForm = (f) => {
                 if (f.dataset.p) return;
                 f.dataset.p = "1";
                 let act = f.getAttribute('action') || window.__px_loc.href;
                 const method = (f.getAttribute('method') || 'GET').toUpperCase();
-                
                 if (method === 'GET') {
                   try {
-                    // Critical Fix: If action starts with /api/proxy, resolve against proxyOrigin
-                    let u;
-                    if (act.startsWith('/api/proxy')) u = new URL(act, proxyOrigin);
-                    else u = new URL(act, window.__px_loc.href);
-
+                    let u = act.startsWith('/api/proxy') ? new URL(act, proxyOrigin) : new URL(act, window.__px_loc.href);
                     let realAct = u.href;
                     if (u.origin === proxyOrigin && u.pathname === '/api/proxy') {
                        const encoded = u.searchParams.get('url');
-                       if (encoded) {
-                          try { realAct = encoded.startsWith('http') ? encoded : atob(encoded); } catch(e) { realAct = encoded; }
-                       }
+                       if (encoded) try { realAct = encoded.startsWith('http') ? encoded : b64d(encoded); } catch(e) { realAct = encoded; }
                     }
-                    
-                    const actionUrl = proxyOrigin + "/api/proxy";
-                    f.setAttribute('action', actionUrl);
-                    
+                    f.setAttribute('action', proxyOrigin + "/api/proxy");
                     if (!f.querySelector('input[name="url"]')) {
                       const h = document.createElement('input');
-                      h.type = 'hidden';
-                      h.name = 'url';
+                      h.type = 'hidden'; h.name = 'url';
                       const pureActObj = new URL(realAct, targetBase);
-                      h.value = btoa(pureActObj.origin + pureActObj.pathname);
+                      h.value = b64e(pureActObj.origin + pureActObj.pathname);
                       f.appendChild(h);
                     }
                   } catch(e) {}
                 }
               };
 
-              // Mutation Observer for dynamic content
+              // Mutation Observer
               const observer = new MutationObserver((mutations) => {
                 mutations.forEach((m) => {
                   m.addedNodes.forEach((n) => {
@@ -250,7 +272,7 @@ async function startServer() {
                       if (n.tagName === 'FORM') patchForm(n);
                       n.querySelectorAll?.('a[href]').forEach(a => a.href = wrapUrl(a.href));
                       n.querySelectorAll?.('form').forEach(patchForm);
-                      if (['SCRIPT', 'IMG', 'IFRAME'].includes(n.tagName)) {
+                      if (['SCRIPT', 'IMG', 'IFRAME', 'SOURCE'].includes(n.tagName)) {
                          if (n.src && !n.src.includes(proxyOrigin)) n.src = wrapUrl(n.src);
                       }
                     }
@@ -259,6 +281,7 @@ async function startServer() {
               });
               observer.observe(document.documentElement, { childList: true, subtree: true });
               document.querySelectorAll('form').forEach(patchForm);
+              document.querySelectorAll('a[href]').forEach(a => a.href = wrapUrl(a.href));
             })();
           </script>
           `;
