@@ -167,10 +167,18 @@ async function startServer() {
           // Attribute rewrite
           text = text.replace(/<(?:!--[\s\S]*?--!?>|[^>]+)>/g, (tag) => {
              if (tag.startsWith('<!--')) return tag;
-             return tag.replace(/\s(src|href|action)=["']([^"']+)["']/gi, (m, a, v) => {
+             // Standard attributes
+             let newTag = tag.replace(/\s(src|href|action)=["']([^"']+)["']/gi, (m, a, v) => {
                 if (v.startsWith('data:') || v.startsWith('#') || v.startsWith('javascript:')) return m;
                 try { return ` ${a}="${baseProxy}${wrap(new URL(v, resolvedUrl).href)}"`; } catch(e) { return m; }
              });
+             // Meta refresh handling
+             if (/<meta\s+http-equiv=["']refresh["']/gi.test(newTag)) {
+                newTag = newTag.replace(/content=["']\d+;\s*url=([^"']+)["']/gi, (m, u) => {
+                   try { return `content="0; url=${baseProxy}${wrap(new URL(u, resolvedUrl).href)}"`; } catch(e) { return m; }
+                });
+             }
+             return newTag;
           });
           // Base strip
           text = text.replace(/<base\s+[^>]*>/gi, '');
@@ -276,7 +284,11 @@ async function startServer() {
                       if (n.tagName === 'FORM') patchForm(n);
                       n.querySelectorAll?.('a[href]').forEach(a => a.href = wrapUrl(a.href));
                       n.querySelectorAll?.('form').forEach(patchForm);
-                      if (['SCRIPT', 'IMG', 'IFRAME', 'SOURCE'].includes(n.tagName)) {
+                      n.querySelectorAll?.('[data-url]').forEach(el => {
+                         const u = el.getAttribute('data-url');
+                         if (u && !u.includes(proxyOrigin)) el.setAttribute('data-url', wrapUrl(u));
+                      });
+                      if (['SCRIPT', 'IMG', 'IFRAME', 'SOURCE', 'VIDEO', 'AUDIO'].includes(n.tagName)) {
                          if (n.src && !n.src.includes(proxyOrigin)) n.src = wrapUrl(n.src);
                       }
                     }
