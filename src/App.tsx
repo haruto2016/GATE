@@ -65,8 +65,8 @@ export default function App() {
     let resolved = targetUrl.trim();
     if (!resolved.startsWith('http')) {
       if (!resolved.includes('.') || resolved.includes(' ')) {
-        // Use Bing. It has the best proxy compatibility.
-        resolved = `https://www.bing.com/search?q=${encodeURIComponent(resolved)}`;
+        // Use Google.
+        resolved = `https://www.google.com/search?q=${encodeURIComponent(resolved)}`;
       } else {
         resolved = 'https://' + resolved;
       }
@@ -359,7 +359,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {[
-                    { name: 'Bing (Search)', url: 'bing.com' },
+                    { name: 'Google', url: 'google.com' },
                     { name: 'YouTube', url: 'youtube.com' },
                     { name: 'X', url: 'x.com' },
                     { name: 'Wikipedia', url: 'wikipedia.org' }
