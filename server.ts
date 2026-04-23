@@ -18,6 +18,8 @@ async function startServer() {
     
     // If it's a proxy request missing the 'url', OR a leaked direct asset request
     if ((isProxyEndpoint && !hasUrlParam) || (!isProxyEndpoint && !isStaticAsset)) {
+      if (req.url.includes('/gen_204')) return res.status(204).send();
+
       const referer = req.headers.referer;
       if (referer && referer.includes('/api/proxy?url=')) {
         try {
@@ -80,8 +82,14 @@ async function startServer() {
         'Origin': targetBase
       };
 
-      // Copy other safe headers
-      ['accept', 'content-type', 'cookie'].forEach(h => {
+      // Copy safe headers
+      const safeHeaders = [
+        'accept', 'content-type', 'cookie', 'authorization', 'referer', 
+        'x-requested-with', 'x-goog-ext-target', 'x-goog-api-key', 'x-goog-api-client', 
+        'x-appengine-api-ticket', 'x-google-update-interactivity', 'x-google-update-appids',
+        'x-google-update-updater'
+      ];
+      safeHeaders.forEach(h => {
         if (req.headers[h]) proxyHeaders[h] = req.headers[h] as string;
       });
 
@@ -143,9 +151,9 @@ async function startServer() {
               text = text.replace(new RegExp(`window\\.location\\.${p}(?!\\s*=)`, 'g'), `(window.__px_loc?.${p} || window.location.${p})`);
               text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${p}(?!\\s*=)`, 'g'), `(window.__px_loc?.${p} || window.location.${p})`);
            });
-           // Patch property setters
-           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val})`);
-           text = text.replace(/window\.location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val})`);
+           // Patch property setters (Explicit only)
+           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `(window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val}))`);
+           text = text.replace(/window\.location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `(window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val}))`);
            
            // Patch methods
            ['replace', 'assign'].forEach(m => {
@@ -153,10 +161,6 @@ async function startServer() {
               text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${uMethod} || window.location.${m}).call(window.location, `);
               text = text.replace(new RegExp(`window\\.location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${uMethod} || window.location.${m}).call(window.location, `);
            });
-           
-           // Special: window.location = ... and location = ...
-           text = text.replace(/window\.location\s*=\s*([^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (window.location = ${val})`);
-           text = text.replace(/(?<!\w|\.)location\s*=\s*((?!(window|this|null|undefined|true|false|0|1|2|3|4|5|6|7|8|9|'|"))[^;}\n\r]+)/g, (m, val) => `window.__px_loc ? window.__px_loc.doAssign(${val}) : (location = ${val})`);
         }
 
         if (isHtml) {
@@ -292,15 +296,26 @@ async function startServer() {
         res.send(text);
       } else {
         if (response.body) {
-          const { Readable } = await import('stream');
-          // @ts-ignore
-          Readable.fromWeb(response.body).pipe(res);
+          try {
+            const { Readable } = await import('stream');
+            // @ts-ignore
+            Readable.fromWeb(response.body).pipe(res);
+          } catch(err) {
+             res.send(Buffer.from(await response.arrayBuffer()));
+          }
         } else {
-          res.send(Buffer.from(await response.arrayBuffer()));
+          const buffer = await response.arrayBuffer();
+          res.send(Buffer.from(buffer));
         }
       }
     } catch (e: any) {
-      res.status(500).send(`Proxy Error: ${e.message}`);
+      if (e.name === 'AbortError') {
+         return res.status(504).send('Proxy Timeout');
+      }
+      console.error(`[Proxy Error] ${req.method} ${req.url} -> ${e.stack || e.message}`);
+      if (!res.headersSent) {
+        res.status(500).send(`Proxy Error: ${e.message}`);
+      }
     }
   });
 
