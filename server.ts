@@ -66,7 +66,9 @@ async function startServer() {
     if (Object.keys(queryParams).length > 0) {
       try {
         const urlObj = new URL(targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl);
-        Object.entries(queryParams).forEach(([k, v]) => urlObj.searchParams.append(k, v as string));
+        Object.entries(queryParams).forEach(([k, v]) => {
+           if (v !== undefined) urlObj.searchParams.set(k, Array.isArray(v) ? v[0] as string : v as string);
+        });
         targetUrl = urlObj.href;
       } catch(e) {}
     }
@@ -75,10 +77,24 @@ async function startServer() {
       const resolvedUrl = targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl;
       const targetBase = new URL(resolvedUrl).origin;
 
+      // Recover actual referer from proxied header
+      const rawReferer = req.headers.referer;
+      let actualReferer = resolvedUrl; 
+      if (rawReferer && rawReferer.includes('/api/proxy?url=')) {
+         try {
+           const refUrl = new URL(rawReferer);
+           const refEnc = refUrl.searchParams.get('url');
+           if (refEnc) {
+              const b64 = refEnc.replace(/ /g, '+');
+              actualReferer = b64.startsWith('http') ? b64 : Buffer.from(b64, 'base64').toString('utf-8');
+           }
+         } catch(e) {}
+      }
+
       const proxyHeaders: Record<string, string> = {
         'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept-Language': (req.headers['accept-language'] as string) || 'ja,en-US;q=0.9,en;q=0.8',
-        'Referer': resolvedUrl,
+        'Referer': actualReferer,
         'Origin': targetBase
       };
 
@@ -116,7 +132,7 @@ async function startServer() {
 
       // Clean headers for framing and privacy
       const strip = [
-        'x-frame-options', 'content-security-policy', 'x-content-security-policy', 
+        'x-frame-options', 'content-security-policy', 'x-content-security-policy', 'content-security-policy-report-only',
         'strict-transport-security', 'content-length', 'content-encoding',
         'cross-origin-opener-policy', 'cross-origin-embedder-policy', 'cross-origin-resource-policy',
         'permissions-policy', 'link', 'origin-trial', 'report-to'
@@ -151,16 +167,14 @@ async function startServer() {
               text = text.replace(new RegExp(`window\\.location\\.${p}(?!\\s*=)`, 'g'), `(window.__px_loc?.${p} || window.location.${p})`);
               text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${p}(?!\\s*=)`, 'g'), `(window.__px_loc?.${p} || window.location.${p})`);
            });
-           // Patch property setters (Explicit only)
-           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `(window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val}))`);
-           text = text.replace(/window\.location\.href\s*=\s*([^;}\n\r]+)/g, (m, val) => `(window.__px_loc ? window.__px_loc.doAssign(${val}) : (location.href = ${val}))`);
+           // Patch property setters & methods safely
+           text = text.replace(/(?<!\w|\.)location\.href\s*=\s*/g, 'window.__px_loc.href=');
+           text = text.replace(/window\.location\.href\s*=\s*/g, 'window.__px_loc.href=');
            
-           // Patch methods
-           ['replace', 'assign'].forEach(m => {
-              const uMethod = m.charAt(0).toUpperCase() + m.slice(1);
-              text = text.replace(new RegExp(`(?<!\\w|\\.)location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${uMethod} || window.location.${m}).call(window.location, `);
-              text = text.replace(new RegExp(`window\\.location\\.${m}\\(`, 'g'), `(window.__px_loc?.do${uMethod} || window.location.${m}).call(window.location, `);
-           });
+           text = text.replace(/(?<!\w|\.)location\.replace\(/g, 'window.__px_loc.replace(');
+           text = text.replace(/window\.location\.replace\(/g, 'window.__px_loc.replace(');
+           text = text.replace(/(?<!\w|\.)location\.assign\(/g, 'window.__px_loc.assign(');
+           text = text.replace(/window\.location\.assign\(/g, 'window.__px_loc.assign(');
         }
 
         if (isHtml) {
@@ -217,9 +231,10 @@ async function startServer() {
                 get search() { return this._u.search; },
                 get hash() { return this._u.hash; },
                 get href() { return this._u.href; },
+                set href(val) { window.location.href = wrapUrl(val); },
                 wrapUrl: wrapUrl,
-                doReplace: (u) => window.location.replace(wrapUrl(u)),
-                doAssign: (u) => window.location.assign(wrapUrl(u))
+                replace: (u) => window.location.replace(wrapUrl(u)),
+                assign: (u) => window.location.assign(wrapUrl(u))
               };
 
               // Fix browser APIs
@@ -255,24 +270,38 @@ async function startServer() {
                 f.dataset.p = "1";
                 let act = f.getAttribute('action') || window.__px_loc.href;
                 const method = (f.getAttribute('method') || 'GET').toUpperCase();
-                if (method === 'GET') {
-                  try {
-                    let u = act.startsWith('/api/proxy') ? new URL(act, proxyOrigin) : new URL(act, window.__px_loc.href);
-                    let realAct = u.href;
-                    if (u.origin === proxyOrigin && u.pathname === '/api/proxy') {
-                       const encoded = u.searchParams.get('url');
-                       if (encoded) try { realAct = encoded.startsWith('http') ? encoded : b64d(encoded); } catch(e) { realAct = encoded; }
-                    }
-                    f.setAttribute('action', proxyOrigin + "/api/proxy");
-                    if (!f.querySelector('input[name="url"]')) {
-                      const h = document.createElement('input');
-                      h.type = 'hidden'; h.name = 'url';
-                      const pureActObj = new URL(realAct, targetBase);
-                      h.value = b64e(pureActObj.origin + pureActObj.pathname);
-                      f.appendChild(h);
-                    }
-                  } catch(e) {}
-                }
+                
+                try {
+                  let u = act.startsWith('/api/proxy') ? new URL(act, proxyOrigin) : new URL(act, window.__px_loc.href);
+                  let realAct = u.href;
+                  if (u.origin === proxyOrigin && u.pathname === '/api/proxy') {
+                     const encoded = u.searchParams.get('url');
+                     if (encoded) try { realAct = encoded.startsWith('http') ? encoded : b64d(encoded); } catch(e) { realAct = encoded; }
+                  }
+                  
+                  const actionUrlObj = new URL(realAct, targetBase);
+                  f.setAttribute('action', proxyOrigin + "/api/proxy");
+                  
+                  // Hidden URL field
+                  let hUrl = f.querySelector('input[name="url"]');
+                  if (!hUrl) {
+                    hUrl = document.createElement('input');
+                    hUrl.type = 'hidden'; hUrl.name = 'url';
+                    f.appendChild(hUrl);
+                  }
+                  hUrl.value = b64e(actionUrlObj.origin + actionUrlObj.pathname);
+
+                  // Extract existing params from action and inject as hidden fields (for GET forms)
+                  if (method === 'GET') {
+                    actionUrlObj.searchParams.forEach((v, k) => {
+                       if (!f.querySelector('input[name="' + k + '"]')) {
+                          const h = document.createElement('input');
+                          h.type = 'hidden'; h.name = k; h.value = v;
+                          f.appendChild(h);
+                       }
+                    });
+                  }
+                } catch(e) {}
               };
 
               // Mutation Observer
